@@ -52,6 +52,9 @@ def main(args):
     model = utils.init_model(args)
 
     # Process each split
+    # Construct few-shot prompt for this specific example
+    few_shot_prompt = construct_fewshot_prompt(train_dataset, num_examples=args.num_few_shot)
+    
     for dataset_split, dataset in [('train', train_dataset), ('validation', test_dataset)]:
         print(f"Generating evaluations for {dataset_split} split")
         generations = {}
@@ -70,9 +73,6 @@ def main(args):
                 'responses': []  # initialize the responses key
             }
 
-            # Construct few-shot prompt for this specific example
-            few_shot_prompt = construct_fewshot_prompt(train_dataset, num_examples=args.num_few_shot)
-
             # Combine few-shot prompt with current input
             current_input = f"Instruction: {question}\nQuestion: {question}\nAnswer: {test_answer}\nEvaluation:"
             local_prompt = few_shot_prompt + current_input
@@ -85,6 +85,7 @@ def main(args):
             full_evaluations = []
             ratings = []
             num_generations = 10
+            """
             for i in range(num_generations):
                 temperature = args.temperature
                 predicted_evaluation, token_log_likelihoods, (embedding, _, _) = model.predict(
@@ -102,6 +103,23 @@ def main(args):
                 ratings.append(rating)
                 evaluation_one_line = predicted_evaluation.replace('\n', ' ')
                 print(f"Evaluation {i + 1}: {evaluation_one_line}")
+            """
+            # Prepare N copies of the same prompt
+            prompts = [local_prompt] * num_generations
+            results = model.predict_batch(prompts, temperature=args.temperature, return_latent=True)
+
+            full_evaluations = []
+            ratings = []
+            for predicted_evaluation, token_log_likelihoods, (embedding, _, _) in results:
+                embedding = embedding.cpu() if embedding is not None else None
+                full_evaluations.append((predicted_evaluation, token_log_likelihoods, embedding))
+                try:
+                    rating_str = predicted_evaluation.split("Rating: ")[1].split("\n")[0].strip()
+                    rating = int(rating_str)
+                except (IndexError, ValueError):
+                    rating = None
+                ratings.append(rating)
+                print(f"Evaluation: {predicted_evaluation.replace(chr(10), ' ')}")
 
             # Compute entropy based on ratings
             valid_ratings = [r for r in ratings if r is not None]

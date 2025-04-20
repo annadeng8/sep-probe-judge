@@ -58,3 +58,51 @@ class HuggingfaceModel:
         if return_latent:
             return sliced_answer, log_likelihoods, (last_token_embedding, None, None)
         return sliced_answer, log_likelihoods, None
+    
+    def predict_batch(self, prompts, temperature=1.0, return_latent=False):
+        """Generate outputs for a batch of prompts."""
+        device = self.model.device
+        max_input_tokens = self.token_limit - self.max_new_tokens
+
+        # Tokenize with padding/truncation
+        tokenized = self.tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=max_input_tokens
+        ).to(device)
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **tokenized,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=True,
+                temperature=temperature,
+                return_dict_in_generate=True,
+                output_scores=True,
+                output_hidden_states=True,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+
+        sequences = outputs.sequences
+        decoded = self.tokenizer.batch_decode(sequences, skip_special_tokens=True)
+
+        results = []
+        for i, prompt in enumerate(prompts):
+            full = decoded[i]
+            generated = full[len(prompt):].strip()
+
+            # Skip latent/log likelihood if not needed
+            if not return_latent:
+                results.append((generated, None, None))
+                continue
+
+            # Compute log probs and embedding (optional)
+            transition_scores = self.model.compute_transition_scores([sequences[i]], [s[i:i+1] for s in outputs.scores], normalize_logits=True)
+            log_likelihoods = [score.item() for score in transition_scores[0]]
+            last_input = outputs.hidden_states[-1][i][-1].unsqueeze(0).cpu()
+            results.append((generated, log_likelihoods, (last_input, None, None)))
+
+        return results
+        
