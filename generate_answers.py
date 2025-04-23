@@ -5,6 +5,7 @@ from datasets import load_dataset
 from uncertainty.utils import utils
 import hashlib
 import random
+import gc
 
 def main(args):
     # Load and split dataset
@@ -48,13 +49,13 @@ def main(args):
         prompt += "Now, provide your evaluation for the following AND GIVE NOTHING ELSE:\n"
         return prompt
 
-    # Initialize model
+     # Initialize model
     model = utils.init_model(args)
 
     # Process each split
     # Construct few-shot prompt for this specific example
     few_shot_prompt = construct_fewshot_prompt(train_dataset, num_examples=args.num_few_shot)
-    
+
     for dataset_split, dataset in [('train', train_dataset), ('validation', test_dataset)]:
         print(f"Generating evaluations for {dataset_split} split")
         generations = {}
@@ -81,10 +82,10 @@ def main(args):
             print("Few-shot prompt constructed:")
             print(local_prompt)
 
-            # Generate 5 evaluations
+            # Generate n evaluations
             full_evaluations = []
             ratings = []
-            num_generations = 10
+            num_generations = 5
             """
             for i in range(num_generations):
                 temperature = args.temperature
@@ -124,7 +125,7 @@ def main(args):
             # Compute entropy based on ratings
             valid_ratings = [r for r in ratings if r is not None]
             if valid_ratings:
-                unique_ratings, counts = np.unique(valid_ratings, return_counts=True)
+                counts = np.unique(valid_ratings, return_counts=True)[1]
                 probs = counts / len(valid_ratings)
                 entropy = -np.sum(probs * np.log(probs))
             else:
@@ -134,6 +135,14 @@ def main(args):
             # Minimal change: use key "responses" instead of "evaluations"
             generations[example['id']]['responses'] = full_evaluations
             generations[example['id']]['entropy'] = entropy
+            # Clean up memory after each sample
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            gc.collect()
+
+            del predicted_evaluation, token_log_likelihoods, embedding, results
+
+
 
         # Save generations
         utils.save(generations, f'{dataset_split}_generations.pkl', save_dir="/workspace/saved")
