@@ -8,6 +8,7 @@ import random
 import gc
 
 def main(args):
+    torch.set_grad_enabled(False)
     # Load and split dataset
     dataset = load_dataset("openbmb/UltraFeedback")["train"].train_test_split(test_size=0.2, seed=42)
     train_dataset = dataset["train"]
@@ -85,7 +86,7 @@ def main(args):
             # Generate n evaluations
             full_evaluations = []
             ratings = []
-            num_generations = 5
+            num_generations = 10
             """
             for i in range(num_generations):
                 temperature = args.temperature
