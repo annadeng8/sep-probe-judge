@@ -55,15 +55,12 @@ class HuggingfaceModel:
         import torch
         device = "cuda" if torch.cuda.is_available() else "cpu"
         results = []
-
         for batch_start in range(0, len(prompts), batch_size):
             batch_prompts = prompts[batch_start:batch_start + batch_size]
-
             # Tokenize batch prompts
             encoded = self.tokenizer(batch_prompts, padding=True, truncation=True,
                                     max_length=self.token_limit - self.max_new_tokens,
                                     return_tensors="pt").to(device)
-
             with torch.no_grad():
                 outputs = self.model.generate(
                     **encoded,
@@ -75,37 +72,22 @@ class HuggingfaceModel:
                     do_sample=True,
                     pad_token_id=self.tokenizer.eos_token_id
                 )
-
             for i, prompt in enumerate(batch_prompts):
                 full_answer = self.tokenizer.decode(outputs.sequences[i], skip_special_tokens=True)
-                
-                # For some models, we need to remove the input_data from the answer.
-                if full_answer.startswith(batch_prompts):
-                    input_data_offset = len(batch_prompts)
-                else:
-                    input_data_offset = 0
-
-                # Remove input from answer.
-                sliced_answer = full_answer[input_data_offset:].strip()
-
+                sliced_answer = full_answer[len(prompt):].strip()
                 # Token stop index and length of input
-                token_stop_index = self.tokenizer(full_answer[:input_data_offset], return_tensors="pt")['input_ids'].shape[1]
+                token_stop_index = self.tokenizer(full_answer, return_tensors="pt")['input_ids'].shape[1]
                 n_input_token = encoded['input_ids'][i].ne(self.tokenizer.pad_token_id).sum().item()
                 n_generated = token_stop_index - n_input_token or 1
-
                 # Last token embedding
                 hidden = outputs.hidden_states
                 last_input = hidden[min(n_generated - 1, len(hidden) - 1)][i]
-                last_layer = last_input[-1]
-                last_token_embedding = last_layer[:, -1, :].cpu()
-
+                last_token_embedding = last_input[-1, :].unsqueeze(0).cpu()
                 # Log likelihoods
                 transition_scores = self.model.compute_transition_scores(outputs.sequences, outputs.scores, normalize_logits=True)
                 log_likelihoods = [score.item() for score in transition_scores[i][:n_generated]]
-
                 if return_latent:
                     results.append((sliced_answer, log_likelihoods, (last_token_embedding, None, None)))
                 else:
                     results.append((sliced_answer, log_likelihoods, None))
-
         return results

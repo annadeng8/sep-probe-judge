@@ -37,7 +37,7 @@ def main(args):
     test_dataset = [x for d in test_dataset for j in range(4) if (x := reformat(d, j)) is not None]
 
     # Construct few-shot prompt using Instruction, Question, Answer, and Rationale
-    def construct_fewshot_prompt(dataset, num_examples=5):
+    def construct_fewshot_prompt(dataset, num_examples=10):
         prompt = """You are an evaluator of text quality. Below are examples to guide your evaluation. Each example includes an Instruction (the task), Question (the specific query), Answer (the response), and Rationale (the reasoning behind the rating). Use these to provide your evaluation.\n\n"""
         sampled_indices = random.sample(range(len(dataset)), min(num_examples, len(dataset)))
         for idx in sampled_indices:
@@ -59,11 +59,10 @@ def main(args):
 
     for dataset_split, dataset in [('train', train_dataset), ('validation', test_dataset)]:
         print(f"Generating evaluations for {dataset_split} split")
-        # This will store all input data and model predictions.
-        accuracies, generations, results_dict, p_trues = [], {}, {}, []
+        generations = {}
 
-        # Evaluate over random subset of the datasets.
-        indices = random.sample(range(0, len(dataset)), min(args.num_samples, len(dataset)))
+        # Limit to a small subset for efficiency
+        indices = range(min(args.num_samples, len(dataset)))
 
         for index in indices:
             example = dataset[index]
@@ -82,84 +81,76 @@ def main(args):
 
             # Print the full prompt before generating evaluations
             print("Few-shot prompt constructed:")
-            # print(local_prompt)
+            print(local_prompt)
 
             # Generate n evaluations
-            full_responses = []
-            
-            if dataset_split == 'train':
-                num_generations = 1
-            else:
-                num_generations = 10
-            
+            full_evaluations = []
+            ratings = []
+            num_generations = 10
+            """
+            for i in range(num_generations):
+                temperature = args.temperature
+                predicted_evaluation, token_log_likelihoods, (embedding, _, _) = model.predict(
+                    local_prompt, temperature, return_latent=True
+                )
+                embedding = embedding.cpu() if embedding is not None else None
+                # Minimal change: append a tuple containing the evaluation string, token log likelihoods, and embedding
+                full_evaluations.append((predicted_evaluation, token_log_likelihoods, embedding))
+                # Extract rating from predicted_evaluation
+                try:
+                    rating_str = predicted_evaluation.split("Rating: ")[1].split("\n")[0].strip()
+                    rating = int(rating_str)
+                except (IndexError, ValueError):
+                    rating = None  # Handle cases where rating extraction fails
+                ratings.append(rating)
+                evaluation_one_line = predicted_evaluation.replace('\n', ' ')
+                print(f"Evaluation {i + 1}: {evaluation_one_line}")
+            """
             # Prepare N copies of the same prompt
             prompts = [local_prompt] * num_generations
-            # results = model.batch_predict(prompts, temperature=args.temperature, return_latent=True)
-            
-            for i in range(num_generations):
+            results = model.predict_batch(prompts, temperature=args.temperature, return_latent=True)
 
-                # Temperature for first generation is always `0.1`.
-                temperature = 0.1 if i == 0 else args.temperature
-
-                predicted_answer, token_log_likelihoods, (embedding, emb_last_before_gen, emb_before_eos) = model.batch_predict(prompts, temperature, return_latent=True) 
-                
-                # Last token embedding
+            full_evaluations = []
+            ratings = []
+            for predicted_evaluation, token_log_likelihoods, (embedding, _, _) in results:
                 embedding = embedding.cpu() if embedding is not None else None
-                # emb_last_before_gen = emb_last_before_gen.cpu() if emb_last_before_gen is not None else None
-                # emb_before_eos = emb_before_eos.cpu() if emb_before_eos is not None else None
-                
-                """
-                compute_acc = args.compute_accuracy_at_all_temps or (i == 0)
-                if correct_answer and compute_acc:
-                    acc = metric(predicted_answer, example, model)
-                else:
-                    acc = 0.0  # pylint: disable=invalid-name
-                """
-                
-                if i == 0:
-                    # accuracies.append(acc)
-                    most_likely_answer_dict = {
-                        'response': predicted_answer,
-                        'token_log_likelihoods': token_log_likelihoods,
-                        'embedding': embedding,
-                        # 'accuracy': acc,
-                        'emb_last_tok_before_gen': emb_last_before_gen,
-                        'emb_tok_before_eos': emb_before_eos, 
-                    }
+                full_evaluations.append((predicted_evaluation, token_log_likelihoods, embedding))
+                try:
+                    rating_str = predicted_evaluation.split("Rating: ")[1].split("\n")[0].strip()
+                    rating = int(rating_str)
+                except (IndexError, ValueError):
+                    rating = None
+                ratings.append(rating)
+                print(f"Evaluation: {predicted_evaluation.replace(chr(10), ' ')}")
 
-                    generations[example['id']].update({
-                        'most_likely_answer': most_likely_answer_dict,
-                        'reference': utils.get_reference(example),
-                    })
-                else:
-                    # Aggregate predictions over num_generations.
-                    full_responses.append(
-                        (predicted_answer, token_log_likelihoods, embedding, None))
+            # Compute entropy based on ratings
+            valid_ratings = [r for r in ratings if r is not None]
+            if valid_ratings:
+                counts = np.unique(valid_ratings, return_counts=True)[1]
+                probs = counts / len(valid_ratings)
+                entropy = -np.sum(probs * np.log(probs))
+            else:
+                entropy = 0  # Default entropy if no valid ratings
+            print(f"Entropy: {entropy:.4f}")
 
-            # Append all predictions for this example to `generations`.
-            generations[example['id']]['responses'] = full_responses
-            
+            # Minimal change: use key "responses" instead of "evaluations"
+            generations[example['id']]['responses'] = full_evaluations
+            generations[example['id']]['entropy'] = entropy
             # Clean up memory after each sample
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
             gc.collect()
 
-            del token_log_likelihoods, embedding
+            del predicted_evaluation, token_log_likelihoods, embedding, results
 
 
-        # Save generations for that split.
-        utils.save(generations, f'{dataset_split}_generations.pkl')
 
-        # Log overall accuracy.
-        # accuracy = np.mean(accuracies)
-        # print(f"Overall {dataset_split} split accuracy: {accuracy}")
+        # Save generations
+        utils.save(generations, f'{dataset_split}_generations.pkl', save_dir="/workspace/saved")
 
-        if dataset_split == 'validation':
-            utils.save(results_dict, 'uncertainty_measures.pkl')
-
-    # utils.save(experiment_details, 'experiment_details.pkl')
+    print("Run complete.")
     del model
-            
+
 if __name__ == '__main__':
     parser = utils.get_parser()
     parser.add_argument("--num_few_shot", type=int, default=5, help="Number of few-shot examples")
