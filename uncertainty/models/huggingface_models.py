@@ -6,8 +6,8 @@ class HuggingfaceModel:
     def __init__(self, model_name, max_new_tokens):
         self.max_new_tokens = max_new_tokens
         model_id = "google/gemma-2b"
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-        self.model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.bfloat16, device_map='auto')
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id, device_map='auto', token_type_ids=None, clean_up_tokenization_spaces=False)
+        self.model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=True, torch_dtype=torch.bfloat16, device_map='auto')
         self.model_name = model_name
         self.token_limit = 8192
     def predict(self, input_data, temperature, return_latent=False):
@@ -41,6 +41,7 @@ class HuggingfaceModel:
         n_generated = token_stop_index - n_input_token or 1
         # Extract last token embedding
         hidden = outputs.hidden_states
+        print("Shape",hidden.shape)
         last_input = hidden[min(n_generated - 1, len(hidden) - 1)][-1]
         last_token_embedding = last_input[:, -1, :].cpu()
         # Compute log likelihoods
@@ -49,46 +50,62 @@ class HuggingfaceModel:
         if return_latent:
             return sliced_answer, log_likelihoods, (last_token_embedding, None, None)
         return sliced_answer, log_likelihoods, None
-    def predict_batch(self, prompts, temperature=1.0, return_latent=False):
-        """Generate outputs for a batch of prompts."""
-        device = self.model.device
-        max_input_tokens = self.token_limit - self.max_new_tokens
-        # Tokenize with padding/truncation
-        tokenized = self.tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=max_input_tokens
-        ).to(device)
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **tokenized,
-                max_new_tokens=self.max_new_tokens,
-                do_sample=True,
-                temperature=temperature,
-                return_dict_in_generate=True,
-                output_scores=True,
-                output_hidden_states=True,
-                pad_token_id=self.tokenizer.eos_token_id
-            )
-        sequences = outputs.sequences
-        decoded = self.tokenizer.batch_decode(sequences, skip_special_tokens=True)
+    def batch_predict(self, prompts, temperature, return_latent=False, batch_size=10):
+        """Generate answers for a batch of prompts and return text, log likelihoods, and embeddings if requested."""
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         results = []
-        for i, prompt in enumerate(prompts):
-            full = decoded[i]
-            generated = full[len(prompt):].strip()
-            # Skip latent/log likelihood if not needed
-            if not return_latent:
-                results.append((generated, None, None))
-                continue
-            # Compute log probs and embedding (optional)
-            transition_scores = self.model.compute_transition_scores(
-                sequences[i:i+1],  # shape: [1, seq_len]
-                [s[i].unsqueeze(0) for s in outputs.scores],  # shape: [1, vocab_size] for each step
-                normalize_logits=True
-            )
-            log_likelihoods = [score.item() for score in transition_scores[0]]
-            last_input = outputs.hidden_states[-1][i][-1].unsqueeze(0).cpu()
-            results.append((generated, log_likelihoods, (last_input, None, None)))
+
+        for batch_start in range(0, len(prompts), batch_size):
+            batch_prompts = prompts[batch_start:batch_start + batch_size]
+
+            # Tokenize batch prompts
+            encoded = self.tokenizer(batch_prompts, padding=True, truncation=True,
+                                    max_length=self.token_limit - self.max_new_tokens,
+                                    return_tensors="pt").to(device)
+
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **encoded,
+                    max_new_tokens=self.max_new_tokens,
+                    return_dict_in_generate=True,
+                    output_scores=True,
+                    output_hidden_states=True,
+                    temperature=temperature,
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.eos_token_id
+                )
+
+            for i, prompt in enumerate(batch_prompts):
+                full_answer = self.tokenizer.decode(outputs.sequences[i], skip_special_tokens=True)
+                
+                # For some models, we need to remove the input_data from the answer.
+                if full_answer.startswith(batch_prompts):
+                    input_data_offset = len(batch_prompts)
+                else:
+                    input_data_offset = 0
+
+                # Remove input from answer.
+                sliced_answer = full_answer[input_data_offset:].strip()
+
+                # Token stop index and length of input
+                token_stop_index = self.tokenizer(full_answer[:input_data_offset], return_tensors="pt")['input_ids'].shape[1]
+                n_input_token = encoded['input_ids'][i].ne(self.tokenizer.pad_token_id).sum().item()
+                n_generated = token_stop_index - n_input_token or 1
+
+                # Last token embedding
+                hidden = outputs.hidden_states
+                last_input = hidden[min(n_generated - 1, len(hidden) - 1)][i]
+                last_layer = last_input[-1]
+                last_token_embedding = last_layer[:, -1, :].cpu()
+
+                # Log likelihoods
+                transition_scores = self.model.compute_transition_scores(outputs.sequences, outputs.scores, normalize_logits=True)
+                log_likelihoods = [score.item() for score in transition_scores[i][:n_generated]]
+
+                if return_latent:
+                    results.append((sliced_answer, log_likelihoods, (last_token_embedding, None, None)))
+                else:
+                    results.append((sliced_answer, log_likelihoods, None))
+
         return results
