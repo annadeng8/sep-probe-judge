@@ -82,7 +82,8 @@ class HuggingfaceModel:
                 # Last token embedding
                 hidden = outputs.hidden_states
                 last_input = hidden[min(n_generated - 1, len(hidden) - 1)][i]
-                last_token_embedding = last_input[-1, :].unsqueeze(0).cpu()
+                # last_token_embedding = last_input[-1, :].unsqueeze(0).cpu()
+                last_token_embedding = last_input[-1, :].cpu()
                 # Log likelihoods
                 transition_scores = self.model.compute_transition_scores(outputs.sequences, outputs.scores, normalize_logits=True)
                 log_likelihoods = [score.item() for score in transition_scores[i][:n_generated]]
