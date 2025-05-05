@@ -108,7 +108,7 @@ def main(args):
             """
             # Prepare N copies of the same prompt
             prompts = [local_prompt] * num_generations
-            results = model.predict_batch(prompts, temperature=args.temperature, return_latent=True)
+            results = model.batch_predict(prompts, temperature=args.temperature, return_latent=True)
 
             full_evaluations = []
             ratings = []
@@ -146,7 +146,7 @@ def main(args):
 
 
         # Save generations
-        utils.save(generations, f'{dataset_split}_generations.pkl', save_dir="/workspace/saved")
+        utils.save(generations, f'{dataset_split}_generations.pkl', save_dir="/workspace/sep-temp")
 
     print("Run complete.")
     del model
