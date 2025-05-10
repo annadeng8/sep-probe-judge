@@ -9,6 +9,8 @@ import gc
 
 def main(args):
     torch.set_grad_enabled(False)
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
     # Load and split dataset
     dataset = load_dataset("openbmb/UltraFeedback")["train"].train_test_split(test_size=0.2, seed=42)
     train_dataset = dataset["train"]

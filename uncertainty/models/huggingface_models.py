@@ -51,16 +51,23 @@ class HuggingfaceModel:
             return sliced_answer, log_likelihoods, (last_token_embedding, None, None)
         return sliced_answer, log_likelihoods, None
     def batch_predict(self, prompts, temperature, return_latent=False, batch_size=10):
-        """Generate answers for a batch of prompts and return text, log likelihoods, and embeddings if requested."""
+        """Generate answers for a batch of prompts and return text, log-likelihoods, and embeddings if requested."""
         import torch
         device = "cuda" if torch.cuda.is_available() else "cpu"
         results = []
+
         for batch_start in range(0, len(prompts), batch_size):
             batch_prompts = prompts[batch_start:batch_start + batch_size]
+
             # Tokenize batch prompts
-            encoded = self.tokenizer(batch_prompts, padding=True, truncation=True,
-                                    max_length=self.token_limit - self.max_new_tokens,
-                                    return_tensors="pt").to(device)
+            encoded = self.tokenizer(
+                batch_prompts,
+                padding=True,
+                truncation=True,
+                max_length=self.token_limit - self.max_new_tokens,
+                return_tensors="pt"
+            ).to(device)
+
             with torch.no_grad():
                 outputs = self.model.generate(
                     **encoded,
@@ -72,23 +79,35 @@ class HuggingfaceModel:
                     do_sample=True,
                     pad_token_id=self.tokenizer.eos_token_id
                 )
+
             for i, prompt in enumerate(batch_prompts):
-                full_answer = self.tokenizer.decode(outputs.sequences[i], skip_special_tokens=True)
+                full_answer   = self.tokenizer.decode(outputs.sequences[i], skip_special_tokens=True)
                 sliced_answer = full_answer[len(prompt):].strip()
-                # Token stop index and length of input
-                token_stop_index = self.tokenizer(full_answer, return_tensors="pt")['input_ids'].shape[1]
-                n_input_token = encoded['input_ids'][i].ne(self.tokenizer.pad_token_id).sum().item()
-                n_generated = token_stop_index - n_input_token or 1
-                # Last token embedding
-                hidden = outputs.hidden_states
-                last_input = hidden[min(n_generated - 1, len(hidden) - 1)][i]
-                # last_token_embedding = last_input[-1, :].unsqueeze(0).cpu()
-                last_token_embedding = last_input[-1, :].cpu()
-                # Log likelihoods
-                transition_scores = self.model.compute_transition_scores(outputs.sequences, outputs.scores, normalize_logits=True)
+
+                # Prompt / generation lengths
+                token_stop_index = self.tokenizer(full_answer, return_tensors="pt")["input_ids"].shape[1]
+                n_input_token    = encoded["input_ids"][i].ne(self.tokenizer.pad_token_id).sum().item()
+                n_generated      = token_stop_index - n_input_token or 1
+
+                # ---- FIXED SECTION ----
+                # last layer → shape (batch, seq_len, hidden_size)
+                hidden_states      = outputs.hidden_states[-1]
+                seq_hidden = hidden_states[i]             # shape: (seq_len, hidden_dim)
+                print(seq_hidden.shape)
+                seq_len = seq_hidden.size(0)
+                last_token_embedding = seq_hidden[seq_len - 1].cpu()
+                print(last_token_embedding.shape)
+                # -----------------------
+
+                # Log-likelihoods for generated tokens
+                transition_scores = self.model.compute_transition_scores(
+                    outputs.sequences, outputs.scores, normalize_logits=True
+                )
                 log_likelihoods = [score.item() for score in transition_scores[i][:n_generated]]
+
                 if return_latent:
                     results.append((sliced_answer, log_likelihoods, (last_token_embedding, None, None)))
                 else:
                     results.append((sliced_answer, log_likelihoods, None))
+
         return results
