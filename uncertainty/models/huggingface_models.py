@@ -91,12 +91,10 @@ class HuggingfaceModel:
 
                 # ---- FIXED SECTION ----
                 # last layer → shape (batch, seq_len, hidden_size)
-                hidden_states      = outputs.hidden_states[-1]
+                
+                hidden_states      = outputs.hidden_states[-1][-1].squeeze(1)
                 seq_hidden = hidden_states[i]             # shape: (seq_len, hidden_dim)
-                print(seq_hidden.shape)
-                seq_len = seq_hidden.size(0)
-                last_token_embedding = seq_hidden[seq_len - 1].cpu()
-                print(last_token_embedding.shape)
+                last_token_embedding = seq_hidden.cpu()
                 # -----------------------
 
                 # Log-likelihoods for generated tokens
