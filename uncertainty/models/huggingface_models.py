@@ -79,7 +79,12 @@ class HuggingfaceModel:
                     do_sample=True,
                     pad_token_id=self.tokenizer.eos_token_id
                 )
-
+            # ---- FIXED SECTION ----
+            # last layer → shape (batch, seq_len, hidden_size)
+            
+            hidden_states      = outputs.hidden_states[0][-1][0,0]
+            last_token_embedding = hidden_states.cpu()
+            
             for i, prompt in enumerate(batch_prompts):
                 full_answer   = self.tokenizer.decode(outputs.sequences[i], skip_special_tokens=True)
                 sliced_answer = full_answer[len(prompt):].strip()
@@ -89,12 +94,6 @@ class HuggingfaceModel:
                 n_input_token    = encoded["input_ids"][i].ne(self.tokenizer.pad_token_id).sum().item()
                 n_generated      = token_stop_index - n_input_token or 1
 
-                # ---- FIXED SECTION ----
-                # last layer → shape (batch, seq_len, hidden_size)
-                
-                hidden_states      = outputs.hidden_states[-1][-1].squeeze(1)
-                seq_hidden = hidden_states[i]             # shape: (seq_len, hidden_dim)
-                last_token_embedding = seq_hidden.cpu()
                 # -----------------------
 
                 # Log-likelihoods for generated tokens

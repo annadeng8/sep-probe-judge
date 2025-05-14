@@ -89,25 +89,7 @@ def main(args):
             full_evaluations = []
             ratings = []
             num_generations = 10
-            """
-            for i in range(num_generations):
-                temperature = args.temperature
-                predicted_evaluation, token_log_likelihoods, (embedding, _, _) = model.predict(
-                    local_prompt, temperature, return_latent=True
-                )
-                embedding = embedding.cpu() if embedding is not None else None
-                # Minimal change: append a tuple containing the evaluation string, token log likelihoods, and embedding
-                full_evaluations.append((predicted_evaluation, token_log_likelihoods, embedding))
-                # Extract rating from predicted_evaluation
-                try:
-                    rating_str = predicted_evaluation.split("Rating: ")[1].split("\n")[0].strip()
-                    rating = int(rating_str)
-                except (IndexError, ValueError):
-                    rating = None  # Handle cases where rating extraction fails
-                ratings.append(rating)
-                evaluation_one_line = predicted_evaluation.replace('\n', ' ')
-                print(f"Evaluation {i + 1}: {evaluation_one_line}")
-            """
+            
             # Prepare N copies of the same prompt
             prompts = [local_prompt] * num_generations
             results = model.batch_predict(prompts, temperature=args.temperature, return_latent=True)
