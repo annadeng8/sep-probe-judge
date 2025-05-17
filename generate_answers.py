@@ -39,7 +39,7 @@ def main(args):
     test_dataset = [x for d in test_dataset for j in range(4) if (x := reformat(d, j)) is not None]
 
     # Construct few-shot prompt using Instruction, Question, Answer, and Rationale
-    def construct_fewshot_prompt(dataset, num_examples=10):
+    def construct_fewshot_prompt(dataset, num_examples=3):
         prompt = """You are an evaluator of text quality. Below are examples to guide your evaluation. Each example includes an Instruction (the task), Question (the specific query), Answer (the response), and Rationale (the reasoning behind the rating). Use these to provide your evaluation.\n\n"""
         sampled_indices = random.sample(range(len(dataset)), min(num_examples, len(dataset)))
         for idx in sampled_indices:
@@ -137,7 +137,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = utils.get_parser()
-    parser.add_argument("--num_few_shot", type=int, default=5, help="Number of few-shot examples")
+    parser.add_argument("--num_few_shot", type=int, default=3, help="Number of few-shot examples")
     args = parser.parse_args()
     print(f"Starting run with args: {args}")
     main(args)
