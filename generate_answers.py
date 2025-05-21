@@ -22,7 +22,7 @@ def main(args):
             completion = example['completions'][j]
             response = completion.get('response', 'No response found')
             annotations = completion.get('annotations', {})
-            instruction_following = annotations.get('instruction_following', {})
+            instruction_following = annotations.get('helpfulness', {})
             rating = instruction_following.get('Rating', 'Unknown rating')
             rationale = instruction_following.get('Rationale', 'No rationale provided')
             md5hash = lambda s: str(int(hashlib.md5(s.encode('utf-8')).hexdigest(), 16))
