@@ -1,11 +1,14 @@
 """Minimal Huggingface model implementation."""
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
+
 class HuggingfaceModel:
     """Simplified Huggingface model for generation and activation caching."""
     def __init__(self, model_name, max_new_tokens):
         self.max_new_tokens = max_new_tokens
-        model_id = "google/gemma-2b"
+        model_id = "google/gemma-2-2b"
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, device_map='auto', token_type_ids=None, clean_up_tokenization_spaces=False)
         self.model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=True, torch_dtype=torch.bfloat16, device_map='auto')
         self.model_name = model_name
