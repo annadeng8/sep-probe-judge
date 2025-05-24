@@ -40,15 +40,16 @@ def main(args):
 
     # Construct few-shot prompt using Instruction, Question, Answer, and Rationale
     def construct_fewshot_prompt(dataset, num_examples=3):
-        prompt = "You are an evaluator of model response quality. Below are examples to guide your evaluation of helpfulness."
+        prompt = "You are an evaluator of model response quality. Below are examples to guide your evaluation of helpfulness.\n\n"
         sampled_indices = random.sample(range(len(dataset)), min(num_examples, len(dataset)))
+        # sampled_indices = [1,2,3]
         for idx in sampled_indices:
             example = dataset[idx]
-            question = example['question']     # Question is the same as instruction
+            question = example['question']    
             answer = example['response']
             evaluation = example['evaluation']
             prompt += f"Question: {question}\nAnswer: {answer}\nEvaluation: {evaluation}\n\n"
-        prompt += "Now, provide your evaluation for the following. Use the same format exactly:\nRating: <1-5>\nRationale: <brief explanation>\nDO NOT include anything else."
+        prompt += "Now, provide your evaluation for the following. Use the same format exactly:\nRating: <1-5>\nRationale: <brief explanation>\nDO NOT include anything else.\n\n"
         return prompt
 
      # Initialize model
