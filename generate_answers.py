@@ -39,7 +39,7 @@ def main(args):
     test_dataset = [x for d in test_dataset for j in range(4) if (x := reformat(d, j)) is not None]
 
     # Construct few-shot prompt using Instruction, Question, Answer, and Rationale
-    def construct_fewshot_prompt(dataset, num_examples=3):
+    def construct_fewshot_prompt(dataset, num_examples=2):
         prompt = "You are an evaluator of model response quality. Below are examples to guide your evaluation of helpfulness.\n\n"
         sampled_indices = random.sample(range(len(dataset)), min(num_examples, len(dataset)))
         # sampled_indices = [1,2,3]
@@ -136,7 +136,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = utils.get_parser()
-    parser.add_argument("--num_few_shot", type=int, default=3, help="Number of few-shot examples")
+    parser.add_argument("--num_few_shot", type=int, default=2, help="Number of few-shot examples")
     args = parser.parse_args()
     print(f"Starting run with args: {args}")
     main(args)
