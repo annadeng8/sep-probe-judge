@@ -56,10 +56,13 @@ class HuggingfaceModel:
                 StopWordsCriteria(stop_strings, self.tokenizer, encoded["input_ids"])
             ])
 
+            allowed_keys = {"input_ids", "attention_mask"}
+            safe_encoded = {k: v for k, v in encoded.items() if k in allowed_keys}
+
             # Now call generate with stopping_criteria
             with torch.no_grad():
                 outputs = self.model.generate(
-                    **encoded,
+                    **safe_encoded,
                     max_new_tokens=self.max_new_tokens,
                     return_dict_in_generate=True,
                     output_scores=True,

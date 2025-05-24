@@ -40,15 +40,14 @@ def main(args):
 
     # Construct few-shot prompt using Instruction, Question, Answer, and Rationale
     def construct_fewshot_prompt(dataset, num_examples=3):
-        prompt = "You are an evaluator of text quality. Below are examples to guide your evaluation of helpfulness."
+        prompt = "You are an evaluator of model response quality. Below are examples to guide your evaluation of helpfulness."
         sampled_indices = random.sample(range(len(dataset)), min(num_examples, len(dataset)))
         for idx in sampled_indices:
             example = dataset[idx]
-            instruction = example['question']  # Instruction is the same as the question
             question = example['question']     # Question is the same as instruction
             answer = example['response']
             evaluation = example['evaluation']
-            prompt += f"Instruction: {instruction}\nQuestion: {question}\nAnswer: {answer}\nEvaluation: {evaluation}\n\n"
+            prompt += f"Question: {question}\nAnswer: {answer}\nEvaluation: {evaluation}\n\n"
         prompt += "Now, provide your evaluation for the following. Use the same format exactly:\nRating: <1-5>\nRationale: <brief explanation>\nDO NOT include anything else."
         return prompt
 
@@ -70,7 +69,6 @@ def main(args):
             example = dataset[index]
             question = example["question"]
             test_answer = example["response"]  # Use the dataset's response as the answer to evaluate
-            # Minimal change: use "context" for the original instruction, and prepend the evaluation prompt to the response
             generations[example['id']] = {
                 'context': question,
                 'question': "Evaluate the following model response: " + test_answer,
@@ -78,7 +76,7 @@ def main(args):
             }
 
             # Combine few-shot prompt with current input
-            current_input = f"Instruction: {question}\nQuestion: {question}\nAnswer: {test_answer}\nEvaluation:"
+            current_input = f"Question: {question}\nAnswer: {test_answer}\nEvaluation:"
             local_prompt = few_shot_prompt + current_input
 
             # Print the full prompt before generating evaluations
@@ -130,7 +128,7 @@ def main(args):
 
 
         # Save generations
-        utils.save(generations, f'{dataset_split}_generations.pkl', save_dir="/workspace/sep-temp")
+        utils.save(generations, f'{dataset_split}_generations.pkl', save_dir="/workspace/sep-temp-1")
 
     print("Run complete.")
     del model
