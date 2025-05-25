@@ -38,19 +38,43 @@ def main(args):
     train_dataset = [x for d in train_dataset for j in range(4) if (x := reformat(d, j)) is not None]
     test_dataset = [x for d in test_dataset for j in range(4) if (x := reformat(d, j)) is not None]
 
-    # Construct few-shot prompt using Instruction, Question, Answer, and Rationale
-    def construct_fewshot_prompt(dataset, num_examples=2):
-        prompt = "You are an evaluator of model response quality. Below are examples to guide your evaluation of helpfulness.\n\n"
-        sampled_indices = random.sample(range(len(dataset)), min(num_examples, len(dataset)))
-        # sampled_indices = [1,2,3]
-        for idx in sampled_indices:
+    # Construct few-shot prompt using Instruction, Question, Response, and Rationale
+    def construct_fewshot_prompt(dataset, num_examples=1, char_limit=1000, max_attempts=50):
+        prompt = f"You are an evaluator of model response quality. Below is an example to guide your evaluation of helpfulness.\n\n"
+        used_indices = set()
+        added = 0
+        attempts = 0
+
+        while added < num_examples and attempts < max_attempts:
+            idx = random.randint(0, len(dataset) - 1)
+            if idx in used_indices:
+                attempts += 1
+                continue
+
+            used_indices.add(idx)
             example = dataset[idx]
-            question = example['question']    
-            answer = example['response']
+            question = example['question']
+            response = example['response']
             evaluation = example['evaluation']
-            prompt += f"Question: {question}\nAnswer: {answer}\nEvaluation: {evaluation}\n\n"
-        prompt += "Now, provide your evaluation for the following. Use the same format exactly:\nRating: <1-5>\nRationale: <brief explanation>\nDO NOT include anything else.\n\n"
+
+            example_text = f"Question: {question}\nResponse: {response}\nEvaluation: {evaluation}\n\n"
+
+            if len(example_text) <= char_limit:
+                prompt += example_text
+                added += 1
+            else:
+                # If too long, skip and try another example
+                attempts += 1
+
+        if added < num_examples:
+            print(f"Warning: Only added {added}/{num_examples} examples due to character limit.")
+
+        prompt += (
+            "Now, provide your evaluation for the following. Use the same format exactly:\n"
+            "Rating: <1-5>\nRationale: <brief explanation>\nDO NOT include anything else.\n\n"
+        )
         return prompt
+
 
      # Initialize model
     model = utils.init_model(args)
@@ -69,15 +93,15 @@ def main(args):
         for index in indices:
             example = dataset[index]
             question = example["question"]
-            test_answer = example["response"]  # Use the dataset's response as the answer to evaluate
+            test_response = example["response"]  # Use the dataset's response as the answer to evaluate
             generations[example['id']] = {
                 'context': question,
-                'question': "Evaluate the following model response: " + test_answer,
+                'question': "Evaluate the following model response: " + test_response,
                 'responses': []  # initialize the responses key
             }
 
             # Combine few-shot prompt with current input
-            current_input = f"Question: {question}\nAnswer: {test_answer}\nEvaluation:"
+            current_input = f"Question: {question}\Response: {test_response}\nEvaluation:"
             local_prompt = few_shot_prompt + current_input
 
             # Print the full prompt before generating evaluations
@@ -88,7 +112,7 @@ def main(args):
             full_evaluations = []
             ratings = []
             num_generations = 10
-            
+
             # Prepare N copies of the same prompt
             prompts = [local_prompt] * num_generations
             results = model.batch_predict(prompts, temperature=args.temperature, return_latent=True)
@@ -136,7 +160,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = utils.get_parser()
-    parser.add_argument("--num_few_shot", type=int, default=2, help="Number of few-shot examples")
+    parser.add_argument("--num_few_shot", type=int, default=1, help="Number of few-shot examples")
     args = parser.parse_args()
     print(f"Starting run with args: {args}")
     main(args)
