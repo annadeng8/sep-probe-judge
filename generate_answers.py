@@ -39,8 +39,8 @@ def main(args):
     test_dataset = [x for d in test_dataset for j in range(4) if (x := reformat(d, j)) is not None]
 
     # Construct few-shot prompt using Instruction, Question, Response, and Rationale
-    def construct_fewshot_prompt(dataset, num_examples=1, char_limit=1000, max_attempts=50):
-        prompt = f"You are an evaluator of model response quality. Below is an example to guide your evaluation of helpfulness.\n\n"
+    def construct_fewshot_prompt(dataset, num_examples=5, char_limit=1000, max_attempts=50):
+        prompt = f"You are an evaluator of model response quality. Below are 5 examples to guide your evaluation of helpfulness.\n\n"
         used_indices = set()
         added = 0
         attempts = 0
@@ -153,14 +153,14 @@ def main(args):
 
 
         # Save generations
-        utils.save(generations, f'{dataset_split}_generations.pkl', save_dir="/workspace/sep-temp-1")
+        utils.save(generations, f'{dataset_split}_generations.pkl', save_dir="/workspace/sep-temp")
 
     print("Run complete.")
     del model
 
 if __name__ == '__main__':
     parser = utils.get_parser()
-    parser.add_argument("--num_few_shot", type=int, default=1, help="Number of few-shot examples")
+    parser.add_argument("--num_few_shot", type=int, default=5, help="Number of few-shot examples")
     args = parser.parse_args()
     print(f"Starting run with args: {args}")
     main(args)

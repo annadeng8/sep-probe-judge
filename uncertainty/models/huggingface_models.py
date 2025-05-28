@@ -70,7 +70,9 @@ class HuggingfaceModel:
                     temperature=temperature,
                     do_sample=True,
                     pad_token_id=self.tokenizer.eos_token_id,
-                    stopping_criteria=stop_criteria
+                    stopping_criteria=stop_criteria,
+                    top_p = 0.9,
+                    top_k = 50
                 )
 
             # ---- FIXED SECTION ----
