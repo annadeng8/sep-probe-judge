@@ -49,7 +49,7 @@ class HuggingfaceModel:
             ).to(device)
 
                 # Define your stop strings
-            stop_strings = ["\n\n", "Question:", "Context:", "Now, provide", "Use exactly"]
+            stop_strings = ["\n\n", "Question:", "Context:", "Now, provide", "Use exactly", "Evaluation"]
 
             # Build stopping criteria
             stop_criteria = StoppingCriteriaList([

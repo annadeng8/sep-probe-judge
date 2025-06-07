@@ -40,7 +40,7 @@ def main(args):
 
     # Construct few-shot prompt using Instruction, Question, Response, and Rationale
     def construct_fewshot_prompt(dataset, num_examples=5, char_limit=1000, max_attempts=50):
-        prompt = f"You are an evaluator of model response quality. Below are 5 examples to guide your evaluation of helpfulness.\n\n"
+        prompt = f"You are an evaluator of text quality. Your task is to evaluate the helpfulness of responses.\n\nCRITICAL FORMAT RULES:\n1. Your response MUST be exactly two lines:\n   Rating: <number 1-5>\n   Rationale: <one sentence explanation>\n2. Do not include any other text, labels, or information\n3. Keep rationales brief and focused\n4. Do not repeat the question or instruction in your rationale\n5. Do not include any text after the rationale\n6. Your response MUST end after the rationale\n\n"
         used_indices = set()
         added = 0
         attempts = 0
@@ -70,8 +70,13 @@ def main(args):
             print(f"Warning: Only added {added}/{num_examples} examples due to character limit.")
 
         prompt += (
-            "Now, provide your evaluation for the following. Use the same format exactly:\n"
-            "Rating: <1-5>\nRationale: <brief explanation>\nDO NOT include anything else.\n\n"
+            "Now evaluate the following response. Remember:\n"
+            "- Use EXACTLY two lines\n"
+            "- First line: Rating: <number 1-5>\n"
+            "- Second line: Rationale: <one sentence>\n"
+            "- Do not include any other text\n"
+            "- Do not include 'Evaluation:' or any prefix\n"
+            "- Your response MUST end after the rationale\n"
         )
         return prompt
 

@@ -1,0 +1,198 @@
+anna's:
+def construct_fewshot_prompt(dataset, num_examples=5, char_limit=1000, max_attempts=50):
+        prompt = f"You are an evaluator of model response quality. Below are 5 examples to guide your evaluation of helpfulness.\n\n"
+        used_indices = set()
+        added = 0
+        attempts = 0
+
+        while added < num_examples and attempts < max_attempts:
+            idx = random.randint(0, len(dataset) - 1)
+            if idx in used_indices:
+                attempts += 1
+                continue
+
+            used_indices.add(idx)
+            example = dataset[idx]
+            question = example['question']
+            response = example['response']
+            evaluation = example['evaluation']
+
+            example_text = f"Question: {question}\nResponse: {response}\nEvaluation: {evaluation}\n\n"
+
+            if len(example_text) <= char_limit:
+                prompt += example_text
+                added += 1
+            else:
+                # If too long, skip and try another example
+                attempts += 1
+
+        if added < num_examples:
+            print(f"Warning: Only added {added}/{num_examples} examples due to character limit.")
+
+        prompt += (
+            "Now, provide your evaluation for the following. Use the same format exactly:\n"
+            "Rating: <1-5>\nRationale: <brief explanation>\nDO NOT include anything else.\n\n"
+        )
+        return prompt
+
+adithya's
+
+"""Generate evaluations with LLM, cache activations, and compute entropy with few-shot prompting."""
+import numpy as np
+import torch
+from datasets import load_dataset
+from uncertainty.utils import utils
+import hashlib
+import random
+import gc
+
+def main(args):
+    torch.set_grad_enabled(False)
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
+    # Load and split dataset
+    dataset = load_dataset("openbmb/UltraFeedback")["train"].train_test_split(test_size=0.2, seed=42)
+    train_dataset = dataset["train"]
+    test_dataset = dataset["test"]
+    # Reformat dataset to include responses and annotations
+    def reformat(example, j):
+        try:
+            completion = example['completions'][j]
+            response = completion.get('response', 'No response found')
+            annotations = completion.get('annotations', {})
+            instruction_following = annotations.get('instruction_following', {})
+            rating = instruction_following.get('Rating', 'Unknown rating')
+            rationale = instruction_following.get('Rationale', 'No rationale provided')
+            md5hash = lambda s: str(int(hashlib.md5(s.encode('utf-8')).hexdigest(), 16))
+            return {
+                'question': example['instruction'],
+                'response': response,
+                'evaluation': f"Rating: {rating}\nRationale: {rationale}",
+                'id': md5hash(str(example['instruction']))
+            }
+        except:
+            return None
+    train_dataset = [x for d in train_dataset for j in range(4) if (x := reformat(d, j)) is not None]
+    test_dataset = [x for d in test_dataset for j in range(4) if (x := reformat(d, j)) is not None]
+    # Construct few-shot prompt using Instruction, Question, Answer, and Rationale
+    def construct_fewshot_prompt(dataset, num_examples=3):
+        prompt = (
+            "You are an evaluator of text quality. Your task is to evaluate the helpfulness of responses.\n\n"
+            "CRITICAL FORMAT RULES:\n"
+            "1. Your response MUST be exactly two lines:\n"
+            "   Rating: <number 1-5>\n"
+            "   Rationale: <one sentence explanation>\n"
+            "2. Do not include any other text, labels, or information\n"
+            "3. Keep rationales brief and focused\n"
+            "4. Do not repeat the question or instruction in your rationale\n"
+            "5. Do not include 'Evaluation:' or any other prefix\n"
+            "6. Do not include any text after the rationale\n"
+            "7. Your response MUST end after the rationale\n\n"
+            "Examples:\n\n"
+        )
+        
+        sampled_indices = random.sample(range(len(dataset)), min(num_examples, len(dataset)))
+        for idx in sampled_indices:
+            example = dataset[idx]
+            prompt += (
+                f"Instruction: {example['question']}\n"
+                f"Response: {example['response']}\n"
+                f"{example['evaluation']}\n"
+                f"END\n\n"
+            )
+            
+        prompt += (
+            "Now evaluate the following response. Remember:\n"
+            "- Use EXACTLY two lines\n"
+            "- First line: Rating: <number 1-5>\n"
+            "- Second line: Rationale: <one sentence>\n"
+            "- Do not include any other text\n"
+            "- Do not include 'Evaluation:' or any prefix\n"
+            "- Your response MUST end after the rationale\n"
+            "- Write END after your response\n\n"
+        )
+        return prompt
+
+    def clean_evaluation(text):
+        # Remove any text before "Rating:"
+        if "Rating:" in text:
+            text = text[text.index("Rating:"):]
+        
+        # Remove anything after "END" if present
+        if "END" in text:
+            text = text[:text.index("END")]
+        
+        # Split into lines and take only the first two
+        lines = text.strip().split('\n')
+        if len(lines) >= 2:
+            return '\n'.join(lines[:2])
+        return text
+
+    # Initialize model
+    model = utils.init_model(args)
+    for dataset_split, dataset in [('train', train_dataset), ('validation', test_dataset)]:
+        print(f"Generating evaluations for {dataset_split} split")
+        generations = {}
+        indices = range(min(args.num_samples, len(dataset)))
+        for index in indices:
+            example = dataset[index]
+            question = example["question"]
+            test_answer = example["response"]
+            generations[example['id']] = {
+                'context': question,
+                'question': "Evaluate the following model response: " + test_answer,
+                'responses': []
+            }
+            current_input = f"Instruction: {question}\nResponse: {test_answer}\n"
+            local_prompt = construct_fewshot_prompt(train_dataset, num_examples=args.num_few_shot) + current_input
+            full_evaluations = []
+            ratings = []
+            num_generations = 10
+            prompts = [local_prompt] * num_generations
+            
+            # Use a lower temperature for more focused outputs
+            results = model.batch_predict(
+                prompts, 
+                temperature=0.3,  # Lower temperature for more focused outputs
+                return_latent=True
+            )
+            
+            for predicted_evaluation, token_log_likelihoods, (embedding, _, _) in results:
+                # Clean up the evaluation text
+                cleaned_evaluation = clean_evaluation(predicted_evaluation)
+                embedding = embedding.cpu() if embedding is not None else None
+                full_evaluations.append((cleaned_evaluation, token_log_likelihoods, embedding))
+                try:
+                    rating_str = cleaned_evaluation.split("Rating: ")[1].split("\n")[0].strip()
+                    rating = int(rating_str)
+                except (IndexError, ValueError):
+                    rating = None
+                ratings.append(rating)
+                print(f"Evaluation: {cleaned_evaluation.replace(chr(10), ' ')}")
+            # Compute entropy based on ratings
+            valid_ratings = [r for r in ratings if r is not None]
+            if valid_ratings:
+                counts = np.unique(valid_ratings, return_counts=True)[1]
+                probs = counts / len(valid_ratings)
+                entropy = -np.sum(probs * np.log(probs))
+            else:
+                entropy = 0  # Default entropy if no valid ratings
+            print(f"Entropy: {entropy:.4f}")
+            # Minimal change: use key "responses" instead of "evaluations"
+            generations[example['id']]['responses'] = full_evaluations
+            generations[example['id']]['entropy'] = entropy
+            # Clean up memory after each sample
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            gc.collect()
+            del predicted_evaluation, token_log_likelihoods, embedding, results
+        # Save generations
+        utils.save(generations, f'{dataset_split}_generations.pkl', save_dir="/workspace/sep-temp")
+    print("Run complete.")
+    del model
+if __name__ == '__main__':
+    parser = utils.get_parser()
+    parser.add_argument("--num_few_shot", type=int, default=3, help="Number of few-shot examples")
+    args = parser.parse_args()
+    print(f"Starting run with args: {args}")
+    main(args)
