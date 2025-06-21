@@ -1,4 +1,4 @@
-"""Generate evaluations with LLM, cache activations, and compute entropy with few-shot prompting."""
+"""Generate answers with LLM, cache activations, and compute semantic entropy using few-shot prompting."""
 import numpy as np
 import torch
 from datasets import load_dataset
@@ -6,6 +6,12 @@ from uncertainty.utils import utils
 import hashlib
 import random
 import gc
+
+from uncertainty.semantic_entropy import (
+    get_semantic_ids,
+    cluster_assignment_entropy,
+    EntailmentDeberta
+)
 
 def main(args):
     torch.set_grad_enabled(False)
@@ -80,19 +86,13 @@ def main(args):
         )
         return prompt
 
-
-     # Initialize model
     model = utils.init_model(args)
-
-    # Process each split
-    # Construct few-shot prompt for this specific example
+    entailment_model = EntailmentDeberta()
     few_shot_prompt = construct_fewshot_prompt(train_dataset, num_examples=args.num_few_shot)
 
     for dataset_split, dataset in [('train', train_dataset), ('validation', test_dataset)]:
-        print(f"Generating evaluations for {dataset_split} split")
+        print(f"Generating answers for {dataset_split} split")
         generations = {}
-
-        # Limit to a small subset for efficiency
         indices = range(min(args.num_samples, len(dataset)))
 
         for index in indices:
@@ -113,51 +113,42 @@ def main(args):
             print("Few-shot prompt constructed:")
             print(local_prompt)
 
-            # Generate n evaluations
-            full_evaluations = []
-            ratings = []
             num_generations = 10
-
-            # Prepare N copies of the same prompt
             prompts = [local_prompt] * num_generations
             results = model.batch_predict(prompts, temperature=args.temperature, return_latent=True)
 
-            full_evaluations = []
-            ratings = []
-            for predicted_evaluation, token_log_likelihoods, (embedding, _, _) in results:
+            responses, log_liks, embeddings = [], [], []
+            for predicted_answer, token_log_likelihoods, (embedding, _, _) in results:
                 embedding = embedding.cpu() if embedding is not None else None
-                full_evaluations.append((predicted_evaluation, token_log_likelihoods, embedding))
-                try:
-                    rating_str = predicted_evaluation.split("Rating: ")[1].split("\n")[0].strip()
-                    rating = int(rating_str)
-                except (IndexError, ValueError):
-                    rating = None
-                ratings.append(rating)
-                print(f"Evaluation: {predicted_evaluation.replace(chr(10), ' ')}")
+                responses.append(predicted_answer)
+                log_liks.append(token_log_likelihoods)
+                embeddings.append(embedding)
+                print(f"Answer: {predicted_answer.replace(chr(10), ' ')}")
 
-            # Compute entropy based on ratings
-            valid_ratings = [r for r in ratings if r is not None]
-            if valid_ratings:
-                counts = np.unique(valid_ratings, return_counts=True)[1]
-                probs = counts / len(valid_ratings)
-                entropy = -np.sum(probs * np.log(probs))
-            else:
-                entropy = 0  # Default entropy if no valid ratings
-            print(f"Entropy: {entropy:.4f}")
+            # Compute semantic entropy using entailment-based clustering
+            try:
+                semantic_ids = get_semantic_ids(responses, model=entailment_model, example=example)
+                entropy = cluster_assignment_entropy(semantic_ids)
+            except Exception as e:
+                print(f"Error computing semantic entropy: {e}")
+                entropy = 0.0
 
-            # Minimal change: use key "responses" instead of "evaluations"
-            generations[example['id']]['responses'] = full_evaluations
-            generations[example['id']]['entropy'] = entropy
-            # Clean up memory after each sample
+            print(f"Semantic Entropy: {entropy:.4f}")
+
+            generations[example['id']].update({
+                'responses': list(zip(responses, log_liks, embeddings)),
+                'most_likely_answer': {
+                    'response': responses[0],
+                    'embedding': embeddings[0],
+                },
+                'entropy': entropy,
+                'reference': example['response']
+            })
+
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
             gc.collect()
 
-            del predicted_evaluation, token_log_likelihoods, embedding, results
-
-
-
-        # Save generations
         utils.save(generations, f'{dataset_split}_generations.pkl', save_dir="/workspace/sep-temp")
 
     print("Run complete.")
@@ -165,7 +156,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = utils.get_parser()
-    parser.add_argument("--num_few_shot", type=int, default=5, help="Number of few-shot examples")
+    parser.add_argument("--num_few_shot", type=int, default=3, help="Number of few-shot examples")
     args = parser.parse_args()
     print(f"Starting run with args: {args}")
     main(args)
