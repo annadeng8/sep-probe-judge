@@ -1,4 +1,4 @@
-"""Generate answers with LLM, cache activations, and compute semantic entropy using few-shot prompting."""
+"""Generate evaluations with LLM, cache activations, and compute entropy with few-shot prompting."""
 import numpy as np
 import torch
 from datasets import load_dataset
@@ -86,13 +86,22 @@ def main(args):
         )
         return prompt
 
+
+     # Initialize model
     model = utils.init_model(args)
     entailment_model = EntailmentDeberta()
     few_shot_prompt = construct_fewshot_prompt(train_dataset, num_examples=args.num_few_shot)
 
+
+    # Process each split
+    # Construct few-shot prompt for this specific example
+    few_shot_prompt = construct_fewshot_prompt(train_dataset, num_examples=args.num_few_shot)
+
     for dataset_split, dataset in [('train', train_dataset), ('validation', test_dataset)]:
-        print(f"Generating answers for {dataset_split} split")
+        print(f"Generating evaluations for {dataset_split} split")
         generations = {}
+
+        # Limit to a small subset for efficiency
         indices = range(min(args.num_samples, len(dataset)))
 
         for index in indices:
@@ -156,7 +165,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = utils.get_parser()
-    parser.add_argument("--num_few_shot", type=int, default=3, help="Number of few-shot examples")
+    parser.add_argument("--num_few_shot", type=int, default=2, help="Number of few-shot examples")
     args = parser.parse_args()
     print(f"Starting run with args: {args}")
     main(args)
