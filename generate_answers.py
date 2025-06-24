@@ -46,7 +46,20 @@ def main(args):
 
     # Construct few-shot prompt using Instruction, Question, Response, and Rationale
     def construct_fewshot_prompt(dataset, num_examples=5, char_limit=1000, max_attempts=50):
-        prompt = f"You are an evaluator of text quality. Your task is to evaluate the helpfulness of responses.\n\nCRITICAL FORMAT RULES:\n1. Your response MUST be exactly two lines:\n   Rating: <number 1-5>\n   Rationale: <one sentence explanation>\n2. Do not include any other text, labels, or information\n3. Keep rationales brief and focused\n4. Do not repeat the question or instruction in your rationale\n5. Do not include any text after the rationale\n6. Your response MUST end after the rationale\n\n"
+        prompt = (
+            "You are an evaluator of text quality. Your task is to evaluate the helpfulness of responses.\n\n"
+            "CRITICAL FORMAT RULES:\n"
+            "1. Your response MUST be exactly two lines:\n"
+            "   Rating: <number 1-5>\n"
+            "   Rationale: <one sentence explanation>\n"
+            "2. Do not include any other text, labels, or information\n"
+            "3. Keep rationales brief and focused\n"
+            "4. Do not repeat the question or instruction in your rationale\n"
+            "5. Do not include 'Evaluation:' or any other prefix\n"
+            "6. Do not include any text after the rationale\n"
+            "7. Your response MUST end after the rationale\n\n"
+            "Examples:\n\n"
+        )
         used_indices = set()
         added = 0
         attempts = 0
@@ -83,9 +96,19 @@ def main(args):
             "- Do not include any other text\n"
             "- Do not include 'Evaluation:' or any prefix\n"
             "- Your response MUST end after the rationale\n"
+            "- Write END after your response\n\n"
         )
         return prompt
-
+    
+    def clean_evaluation(text):
+        if "Rating:" in text:
+            text = text[text.index("Rating:"):]
+        if "END" in text:
+            text = text[:text.index("END")]
+        lines = text.strip().split('\n')
+        if len(lines) >= 2:
+            return '\n'.join(lines[:2])
+        return text
 
      # Initialize model
     model = utils.init_model(args)
@@ -128,6 +151,7 @@ def main(args):
 
             responses, log_liks, embeddings = [], [], []
             for predicted_answer, token_log_likelihoods, (embedding, _, _) in results:
+                predicted_answer = clean_evaluation(predicted_answer)
                 embedding = embedding.cpu() if embedding is not None else None
                 responses.append(predicted_answer)
                 log_liks.append(token_log_likelihoods)

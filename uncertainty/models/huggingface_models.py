@@ -81,9 +81,11 @@ class HuggingfaceModel:
             target_token = self.tokenizer.encode("Question:", add_special_tokens=False)[0]
             penalty = 10.0  # large → lower probability a lot
 
+            """
             logits_processor = LogitsProcessorList([
                 PenalizeTokenProcessor(token_id=target_token, penalty=penalty)
             ])
+            """
 
 
             # Now call generate with stopping_criteria
@@ -91,7 +93,7 @@ class HuggingfaceModel:
                 outputs = self.model.generate(
                     **safe_encoded,
                     max_new_tokens=self.max_new_tokens,
-                    logits_processor=logits_processor,
+                    #logits_processor=logits_processor,
                     return_dict_in_generate=True,
                     output_scores=True,
                     output_hidden_states=True,
