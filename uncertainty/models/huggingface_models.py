@@ -65,30 +65,18 @@ class HuggingfaceModel:
                 return_tensors="pt"
             ).to(device)
 
-                # Define your stop strings
-            # Stop generation when the model tries to start a new question or add extra labels
-            stop_strings = ["Q:", "Context:", "Answer:", "Evaluation", "END"]
-
-            # Build stopping criteria
-            stop_criteria = StoppingCriteriaList([
-                StopWordsCriteria(stop_strings, self.tokenizer, encoded["input_ids"])
-            ])
-
             allowed_keys = {"input_ids", "attention_mask"}
             safe_encoded = {k: v for k, v in encoded.items() if k in allowed_keys}
-
 
             target_token = self.tokenizer.encode("Question:", add_special_tokens=False)[0]
             penalty = 10.0  # large → lower probability a lot
 
-            """
-            logits_processor = LogitsProcessorList([
-                PenalizeTokenProcessor(token_id=target_token, penalty=penalty),
-            ])
-            """
+            # Remove custom stopping criteria
+            # logits_processor = LogitsProcessorList([
+            #     PenalizeTokenProcessor(token_id=target_token, penalty=penalty),
+            # ])
 
-
-            # Now call generate with stopping_criteria
+            # Now call generate WITHOUT stopping_criteria
             with torch.no_grad():
                 outputs = self.model.generate(
                     **safe_encoded,
@@ -100,10 +88,9 @@ class HuggingfaceModel:
                     temperature=temperature,
                     do_sample=True,
                     pad_token_id=self.tokenizer.eos_token_id,
-                    stopping_criteria=stop_criteria,
                     top_p = 0.85,
                     top_k = 50,
-                    )
+                )
 
             """
             for step_idx, step_logits in enumerate(outputs.scores):  # one per generated token
