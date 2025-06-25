@@ -76,7 +76,7 @@ def main(args):
             response = example['response']
             evaluation = example['evaluation']
 
-            example_text = f"Question: {question}\nResponse: {response}\nEvaluation: {evaluation}\n\n"
+            example_text = f"Question: {question}\nResponse: {response}\nEvaluation: {evaluation} END\n\n"
 
             if len(example_text) <= char_limit:
                 prompt += example_text
