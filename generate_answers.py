@@ -45,7 +45,7 @@ def main(args):
     test_dataset = [x for d in test_dataset for j in range(4) if (x := reformat(d, j)) is not None]
 
     # Construct few-shot prompt using Instruction, Question, Response, and Rationale
-    def construct_fewshot_prompt(dataset, num_examples=5, char_limit=1000, max_attempts=50):
+    def construct_fewshot_prompt(dataset, num_examples=3, char_limit=1000, max_attempts=50):
         prompt = (
             "You are an evaluator of text quality. Your task is to evaluate the helpfulness of responses.\n\n"
             "CRITICAL FORMAT RULES:\n"
@@ -124,72 +124,95 @@ def main(args):
         print(f"Generating evaluations for {dataset_split} split")
         generations = {}
 
-        # Limit to a small subset for efficiency
-        indices = range(min(args.num_samples, len(dataset)))
+        # To ensure exactly num_samples valid datapoints
+        collected = 0
+        index = 0
+        dataset_len = len(dataset)
+        max_trials = 2 * args.num_samples  # failsafe, to avoid infinite loop
 
-        for index in indices:
+        while collected < args.num_samples and index < dataset_len and index < max_trials:
+            print(f"\n>>> Starting example {collected+1}/{args.num_samples} (dataset index {index})")
             example = dataset[index]
-            question = example["question"]
-            test_response = example["response"]  # Use the dataset's response as the answer to evaluate
-            generations[example['id']] = {
-                'context': question,
-                'question': "Evaluate the following model response: " + test_response,
-                'responses': []  # initialize the responses key
-            }
+            index += 1
 
-            # Combine few-shot prompt with current input
-            current_input = f"Question: {question}\Response: {test_response}\nEvaluation:"
+            question = example["question"]
+            test_response = example["response"]
+            current_input = f"Question: {question}\nResponse: {test_response}\nEvaluation:"
             local_prompt = few_shot_prompt + current_input
 
-            # Print the full prompt before generating evaluations
-            print("Few-shot prompt constructed:")
-            print(local_prompt)
+            # 1. Greedy generation
+            print(" - [Step 1] Getting greedy generation...")
+            try:
+                greedy_result = model.batch_predict([local_prompt], temperature=0.1, return_latent=True)
+                greedy_predicted_answer, _, (greedy_embedding, _, _) = greedy_result[0]
+                greedy_embedding = greedy_embedding.cpu() if greedy_embedding is not None else None
+            except Exception as e:
+                print(f"Greedy generation failed: {e}")
+                continue
 
-            num_generations = 10
-            prompts = [local_prompt] * num_generations
-            results = model.batch_predict(prompts, temperature=args.temperature, return_latent=True)
+            # 2. Sampling for SE
+            print(" - [Step 2] Sampling for entropy...")
+            try:
+                num_generations = 10
+                prompts = [local_prompt] * num_generations
+                results = model.batch_predict(prompts, temperature=args.temperature, return_latent=True)
 
-            responses, log_liks, embeddings = [], [], []
-            for predicted_answer, token_log_likelihoods, (embedding, _, _) in results:
-                predicted_answer = clean_evaluation(predicted_answer)
-                embedding = embedding.cpu() if embedding is not None else None
-                responses.append(predicted_answer)
-                log_liks.append(token_log_likelihoods)
-                embeddings.append(embedding)
-                print(f"Answer: {predicted_answer.replace(chr(10), ' ')}")
+                responses, log_liks, embeddings = [], [], []
+                for predicted_answer, token_log_likelihoods, (embedding, _, _) in results:
+                    predicted_answer = clean_evaluation(predicted_answer)
+                    rationale_only = predicted_answer.split("Rationale:")[-1].strip()
+                    responses.append(rationale_only)
+                    log_liks.append(token_log_likelihoods)
+                    embeddings.append(embedding.cpu() if embedding is not None else None)
+            except Exception as e:
+                print(f"   ✖ Sampling failed: {e}")
+                continue
 
-            # Compute semantic entropy using entailment-based clustering
+            # 3. Entropy
+            print(" - [Step 3] Computing semantic entropy...")
             try:
                 semantic_ids = get_semantic_ids(responses, model=entailment_model, example=example)
                 entropy = cluster_assignment_entropy(semantic_ids)
             except Exception as e:
-                print(f"Error computing semantic entropy: {e}")
-                entropy = 0.0
+                print(f"   ✖ Entropy computation failed: {e}")
+                continue
 
-            print(f"Semantic Entropy: {entropy:.4f}")
+            print(f" - ✓ Finished example {collected+1}/{args.num_samples}, entropy = {entropy:.3f}")
 
-            generations[example['id']].update({
+
+            # 4. Save the data point (greedy embedding for probe, responses for SE)
+            generations[example['id']] = {
+                'context': question,
+                'question': "Evaluate the following model response: " + test_response,
                 'responses': list(zip(responses, log_liks, embeddings)),
                 'most_likely_answer': {
-                    'response': responses[0],
-                    'embedding': embeddings[0],
+                    'response': greedy_predicted_answer,
+                    'embedding': greedy_embedding,  # <--- always the greedy one!
                 },
                 'entropy': entropy,
                 'reference': example['response']
-            })
+            }
+
+            collected += 1  # Only increment if all above succeeds!
 
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
             gc.collect()
 
+            if collected % 50 == 0:
+                print(f"Collected {collected}/{args.num_samples} valid examples so far...")
+
+        # Save output for this split
         utils.save(generations, f'{dataset_split}_generations.pkl', save_dir="/workspace/sep-temp")
+
+
 
     print("Run complete.")
     del model
 
 if __name__ == '__main__':
     parser = utils.get_parser()
-    parser.add_argument("--num_few_shot", type=int, default=2, help="Number of few-shot examples")
+    parser.add_argument("--num_few_shot", type=int, default=3, help="Number of few-shot examples")
     args = parser.parse_args()
     print(f"Starting run with args: {args}")
     main(args)
