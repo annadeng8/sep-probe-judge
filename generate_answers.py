@@ -10,10 +10,13 @@ Revision notes
     ▸ have “Rating:” 1-5
     ▸ have a non-empty “Rationale: …”
 • malformed answers are silently skipped
-• **NEW**: print the entropy value for every kept batch
+• **prints entropy** for every kept batch
+• **NEW**: shuffle train/validation example order so the same question
+  is not repeatedly pulled
 """
 import re
 import gc
+import time
 import random
 import hashlib
 import numpy as np
@@ -29,16 +32,16 @@ from uncertainty.semantic_entropy import (
 # --------------------------------------------------------------------------- #
 #  Strict evaluation-line regexes                                             #
 # --------------------------------------------------------------------------- #
-RATING_RE    = re.compile(r"^Rating:\s*[1-5]\s*$",  re.I)
-RATIONALE_RE = re.compile(r"^Rationale:\s*\S.*$",   re.I)
+RATING_RE    = re.compile(r"^Rating:\s*[1-5]\s*$", re.I)
+RATIONALE_RE = re.compile(r"^Rationale:\s*\S.*$",  re.I)
 
 
 def clean_evaluation(text: str) -> str | None:
     """
-    Return the cleaned two-line evaluation if it exactly matches
+    Keep only answers that match the exact two-line format:
         Rating: <1-5>
         Rationale: <non-empty …>
-    else return None.
+    Return the cleaned string or None (discard) if malformed.
     """
     if "Rating:" in text:
         text = text[text.index("Rating:") :]
@@ -72,25 +75,31 @@ def main(args):
     # -------- 2. REFORMAT ----------------------------------------------------
     def reformat(ex, j):
         try:
-            comp  = ex["completions"][j]
-            resp  = comp.get("response", "No response found")
-            ann   = comp.get("annotations", {}).get("helpfulness", {})
-            md5   = lambda s: str(int(hashlib.md5(s.encode()).hexdigest(), 16))
+            comp = ex["completions"][j]
+            resp = comp.get("response", "No response found")
+            ann  = comp.get("annotations", {}).get("helpfulness", {})
+            md5  = lambda s: str(int(hashlib.md5(s.encode()).hexdigest(), 16))
             return {
                 "question":   ex["instruction"],
                 "response":   resp,
-                "evaluation": f"Rating: {ann.get('Rating','?')}\n"
-                              f"Rationale: {ann.get('Rationale','?')}",
+                "evaluation": f"Rating: {ann.get('Rating', '?')}\n"
+                              f"Rationale: {ann.get('Rationale', '?')}",
                 "id":         md5(ex["instruction"]),
             }
         except Exception:
             return None
 
-    unpack = lambda raw: [
-        x for d in raw for j in range(4)
-        if (x := reformat(d, j)) is not None
-    ]
+    def unpack(raw):
+        return [
+            x for d in raw for j in range(4)
+            if (x := reformat(d, j)) is not None
+        ]
+
     train_ds, test_ds = unpack(train_raw), unpack(test_raw)
+
+    # -------- NEW: shuffle so we don’t keep seeing the same example ----------
+    random.shuffle(train_ds)
+    random.shuffle(test_ds)
 
     # -------- 3. FEW-SHOT PROMPT --------------------------------------------
     def fewshot(dataset, k=3, limit=1000):
@@ -103,7 +112,7 @@ def main(args):
             "2. Do not include any other text, labels, or information\n"
             "3. Keep rationales brief and focused\n"
             "4. Do not repeat the question or instruction in your rationale\n"
-            "5. Do not include 'Evaluation:' or any other prefix\n"
+            "5. Do not include 'Evaluation:' or any prefix\n"
             "6. Do not include any text after the rationale\n"
             "7. Your response MUST end after the rationale\n\n"
             "Examples:\n\n"
@@ -181,7 +190,7 @@ def main(args):
             print("------------ MODEL ANSWERS -------------")
             for i, r in enumerate(responses, 1):
                 print(f"{i}. {r}")
-            print(f"Entropy: {entropy:.4f}")            # <--- New line
+            print(f"Entropy: {entropy:.4f}")
             print("----------------------------------------\n")
 
             # ----- Store -----------------------------------------------------
