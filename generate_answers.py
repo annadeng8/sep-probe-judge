@@ -1,50 +1,99 @@
+#!/usr/bin/env python3
+"""
+Generate evaluations with LLM, cache activations, and compute entropy with few-shot prompting.
+
+Revision notes
+--------------
+• keep the entire two-line evaluation in `responses`
+• print the prompt and *every* sampled answer to stdout
+• **strict `clean_evaluation()`** – only accept answers that
+    ▸ have “Rating:” 1-5
+    ▸ have a non-empty “Rationale: …”
+• malformed answers are silently skipped
+• **NEW**: print the entropy value for every kept batch
+"""
+import re
+import gc
+import random
+import hashlib
 import numpy as np
 import torch
 from datasets import load_dataset
 from uncertainty.utils import utils
-import hashlib
-import random
-import gc
-
 from uncertainty.semantic_entropy import (
     get_semantic_ids,
     cluster_assignment_entropy,
-    EntailmentDeberta
+    EntailmentDeberta,
 )
 
+# --------------------------------------------------------------------------- #
+#  Strict evaluation-line regexes                                             #
+# --------------------------------------------------------------------------- #
+RATING_RE    = re.compile(r"^Rating:\s*[1-5]\s*$",  re.I)
+RATIONALE_RE = re.compile(r"^Rationale:\s*\S.*$",   re.I)
+
+
+def clean_evaluation(text: str) -> str | None:
+    """
+    Return the cleaned two-line evaluation if it exactly matches
+        Rating: <1-5>
+        Rationale: <non-empty …>
+    else return None.
+    """
+    if "Rating:" in text:
+        text = text[text.index("Rating:") :]
+    if "END" in text:
+        text = text[: text.index("END")]
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return None
+    rating, rationale = lines[:2]
+    if not RATING_RE.fullmatch(rating):
+        return None
+    if not RATIONALE_RE.fullmatch(rationale):
+        return None
+    return f"{rating}\n{rationale}"
+
+
+# --------------------------------------------------------------------------- #
+#  Main program                                                               #
+# --------------------------------------------------------------------------- #
 def main(args):
     torch.set_grad_enabled(False)
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
-    # Load and split dataset
-    dataset = load_dataset("openbmb/UltraFeedback")["train"].train_test_split(test_size=0.2, seed=42)
-    train_dataset = dataset["train"]
-    test_dataset = dataset["test"]
 
-    # Reformat dataset to include responses and annotations
-    def reformat(example, j):
+    # -------- 1. LOAD & SPLIT DATASET ---------------------------------------
+    ds = load_dataset("openbmb/UltraFeedback")["train"].train_test_split(
+        test_size=0.2, seed=42
+    )
+    train_raw, test_raw = ds["train"], ds["test"]
+
+    # -------- 2. REFORMAT ----------------------------------------------------
+    def reformat(ex, j):
         try:
-            completion = example['completions'][j]
-            response = completion.get('response', 'No response found')
-            annotations = completion.get('annotations', {})
-            instruction_following = annotations.get('helpfulness', {})
-            rating = instruction_following.get('Rating', 'Unknown rating')
-            rationale = instruction_following.get('Rationale', 'No rationale provided')
-            md5hash = lambda s: str(int(hashlib.md5(s.encode('utf-8')).hexdigest(), 16))
+            comp  = ex["completions"][j]
+            resp  = comp.get("response", "No response found")
+            ann   = comp.get("annotations", {}).get("helpfulness", {})
+            md5   = lambda s: str(int(hashlib.md5(s.encode()).hexdigest(), 16))
             return {
-                'question': example['instruction'],
-                'response': response,
-                'evaluation': f"Rating: {rating}\nRationale: {rationale}",
-                'id': md5hash(str(example['instruction']))
+                "question":   ex["instruction"],
+                "response":   resp,
+                "evaluation": f"Rating: {ann.get('Rating','?')}\n"
+                              f"Rationale: {ann.get('Rationale','?')}",
+                "id":         md5(ex["instruction"]),
             }
-        except:
+        except Exception:
             return None
 
-    train_dataset = [x for d in train_dataset for j in range(4) if (x := reformat(d, j)) is not None]
-    test_dataset = [x for d in test_dataset for j in range(4) if (x := reformat(d, j)) is not None]
+    unpack = lambda raw: [
+        x for d in raw for j in range(4)
+        if (x := reformat(d, j)) is not None
+    ]
+    train_ds, test_ds = unpack(train_raw), unpack(test_raw)
 
-    # Construct few-shot prompt using Instruction, Question, Response, and Rationale
-    def construct_fewshot_prompt(dataset, num_examples=5, char_limit=1000, max_attempts=50):
+    # -------- 3. FEW-SHOT PROMPT --------------------------------------------
+    def fewshot(dataset, k=3, limit=1000):
         prompt = (
             "You are an evaluator of text quality. Your task is to evaluate the helpfulness of responses.\n\n"
             "CRITICAL FORMAT RULES:\n"
@@ -59,326 +108,115 @@ def main(args):
             "7. Your response MUST end after the rationale\n\n"
             "Examples:\n\n"
         )
-        used_indices = set()
-        added = 0
-        attempts = 0
-
-        while added < num_examples and attempts < max_attempts:
-            idx = random.randint(0, len(dataset) - 1)
-            if idx in used_indices:
-                attempts += 1
-                continue
-
-            used_indices.add(idx)
-            example = dataset[idx]
-            question = example['question']
-            response = example['response']
-            evaluation = example['evaluation']
-
-            example_text = f"Question: {question}\nResponse: {response}\nEvaluation: {evaluation}\n\n"
-
-            if len(example_text) <= char_limit:
-                prompt += example_text
-                added += 1
-            else:
-                # If too long, skip and try another example
-                attempts += 1
-
-        if added < num_examples:
-            print(f"Warning: Only added {added}/{num_examples} examples due to character limit.")
-
+        for ex in random.sample(dataset, k):
+            snippet = (
+                f"Question: {ex['question']}\n"
+                f"Response: {ex['response']}\n"
+                f"Evaluation: {ex['evaluation']} END\n\n"
+            )
+            prompt += snippet[:limit]
         prompt += (
-            "Now evaluate the following response. Remember:\n"
-            "- Use EXACTLY two lines\n"
-            "- First line: Rating: <number 1-5>\n"
-            "- Second line: Rationale: <one sentence>\n"
-            "- Do not include any other text\n"
-            "- Do not include 'Evaluation:' or any prefix\n"
-            "- Your response MUST end after the rationale\n"
-            "- Write END after your response\n\n"
+            "Now evaluate the following response. Remember the exact two-line format. "
+            "Write END after your response.\n\n"
         )
         return prompt
 
-    def clean_evaluation(text):
-        """Sanitize model output to the expected two-line format."""
-        if "Rating:" in text:
-            text = text[text.index("Rating:") :]
-        if "END" in text:
-            text = text[: text.index("END")]
-        # Remove common prefixes the model sometimes adds
-        for prefix in ["Answer:", "Evaluation:"]:
-            if text.startswith(prefix):
-                text = text[len(prefix) :].lstrip()
-        lines = text.strip().split("\n")
-        if len(lines) >= 2:
-            return "\n".join(lines[:2])
-        return text.strip()
+    few_shot_prompt = fewshot(train_ds, k=args.num_few_shot)
 
-     # Initialize model
-    model = utils.init_model(args)
+    # -------- 4. INITIALISE MODELS ------------------------------------------
+    model            = utils.init_model(args)
     entailment_model = EntailmentDeberta()
-    few_shot_prompt = construct_fewshot_prompt(train_dataset, num_examples=args.num_few_shot)
 
+    # -------- 5. MAIN LOOP ---------------------------------------------------
+    for split_name, data in [("train", train_ds), ("validation", test_ds)]:
+        print(f"\n========== Generating evaluations for {split_name} split ==========")
+        generations, collected, idx = {}, 0, 0
 
-    # Process each split
-    # Construct few-shot prompt for this specific example
-    few_shot_prompt = construct_fewshot_prompt(train_dataset, num_examples=args.num_few_shot)
+        while collected < args.num_samples and idx < len(data):
+            ex = data[idx]
+            idx += 1
 
-    for dataset_split, dataset in [('train', train_dataset), ('validation', test_dataset)]:
-        print(f"Generating evaluations for {dataset_split} split")
-        generations = {}
+            q, resp = ex["question"], ex["response"]
+            lp = f"{few_shot_prompt}Question: {q}\nResponse: {resp}\nEvaluation:"
 
-        # Limit to a small subset for efficiency
-        indices = range(min(args.num_samples, len(dataset)))
-
-        for index in indices:
-            example = dataset[index]
-            question = example["question"]
-            test_response = example["response"]  # Use the dataset's response as the answer to evaluate
-            generations[example['id']] = {
-                'context': question,
-                'question': "Evaluate the following model response: " + test_response,
-                'responses': []  # initialize the responses key
-            }
-
-            # Combine few-shot prompt with current input
-            current_input = f"Question: {question}\nResponse: {test_response}\nEvaluation:"
-            local_prompt = few_shot_prompt + current_input
-
-            # Print the full prompt before generating evaluations
-            print("Few-shot prompt constructed:")
-            print(local_prompt)
-
-            num_generations = 10
-            prompts = [local_prompt] * num_generations
-            results = model.batch_predict(prompts, temperature=args.temperature, return_latent=True)
-
-            responses, log_liks, embeddings = [], [], []
-            for predicted_answer, token_log_likelihoods, (embedding, _, _) in results:
-                predicted_answer = clean_evaluation(predicted_answer)
-                embedding = embedding.cpu() if embedding is not None else None
-                responses.append(predicted_answer)
-                log_liks.append(token_log_likelihoods)
-                embeddings.append(embedding)
-                print(f"Answer: {predicted_answer.replace(chr(10), ' ')}")
-
-            # Compute semantic entropy using entailment-based clustering
+            # ----- Greedy ----------------------------------------------------
             try:
-                semantic_ids = get_semantic_ids(responses, model=entailment_model, example=example)
-                entropy = cluster_assignment_entropy(semantic_ids)
-            except Exception as e:
-                print(f"Error computing semantic entropy: {e}")
-                entropy = 0.0
+                g_ans, _, (g_last, g_sec, g_pre) = model.batch_predict(
+                    [lp], temperature=0.1, return_latent=True
+                )[0]
+                greedy = clean_evaluation(g_ans)
+                if greedy is None:
+                    continue
+            except Exception:
+                continue
 
-            print(f"Semantic Entropy: {entropy:.4f}")
+            # ----- Sampling --------------------------------------------------
+            responses, log_liks, embeds = [], [], []
+            attempts = 0
+            while len(responses) < 10 and attempts < 40:
+                attempts += 1
+                ans, tls, (e_last, *_rest) = model.batch_predict(
+                    [lp], temperature=args.temperature, return_latent=True
+                )[0]
+                clean = clean_evaluation(ans)
+                if clean is None:
+                    continue
+                responses.append(clean)
+                log_liks.append(tls)
+                embeds.append(e_last)
 
-            generations[example['id']].update({
-                'responses': list(zip(responses, log_liks, embeddings)),
-                'most_likely_answer': {
-                    'response': responses[0],
-                    'embedding': embeddings[0],
+            if len(responses) < 3:
+                continue
+
+            # ----- Entropy ---------------------------------------------------
+            try:
+                sem_ids = get_semantic_ids(responses, entailment_model, ex)
+                entropy = cluster_assignment_entropy(sem_ids)
+            except Exception:
+                continue
+
+            # ----- Print to terminal ----------------------------------------
+            print("\n---------------- PROMPT ----------------")
+            print(lp)
+            print("------------ MODEL ANSWERS -------------")
+            for i, r in enumerate(responses, 1):
+                print(f"{i}. {r}")
+            print(f"Entropy: {entropy:.4f}")            # <--- New line
+            print("----------------------------------------\n")
+
+            # ----- Store -----------------------------------------------------
+            generations[ex["id"]] = {
+                "context": q,
+                "question": "Evaluate the following model response: " + resp,
+                "responses": list(zip(responses, log_liks, embeds)),
+                "most_likely_answer": {
+                    "response": greedy,
+                    "last_embedding": g_last,
+                    "sec_last_embedding": g_sec,
+                    "prompt_last_embedding": g_pre,
                 },
-                'entropy': entropy,
-                'reference': example['response']
-            })
+                "entropy": entropy,
+                "reference": resp,
+            }
+            collected += 1
 
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-            gc.collect()
-
-        utils.save(generations, f'{dataset_split}_generations.pkl', save_dir="/workspace/sep-temp")
+        utils.save(
+            generations, f"{split_name}_generations.pkl",
+            save_dir="/workspace/sep-temp"
+        )
 
     print("Run complete.")
     del model
-
-if __name__ == '__main__':
-    parser = utils.get_parser()
-    parser.add_argument("--num_few_shot", type=int, default=2, help="Number of few-shot examples")
-    args = parser.parse_args()
-    print(f"Starting run with args: {args}")
-    main(args)
-
-    torch.set_grad_enabled(False)
     torch.cuda.empty_cache()
-    torch.cuda.ipc_collect()
-    # Load and split dataset
-    dataset = load_dataset("openbmb/UltraFeedback")["train"].train_test_split(test_size=0.2, seed=42)
-    train_dataset = dataset["train"]
-    test_dataset = dataset["test"]
-
-    # Reformat dataset to include responses and annotations
-    def reformat(example, j):
-        try:
-            completion = example['completions'][j]
-            response = completion.get('response', 'No response found')
-            annotations = completion.get('annotations', {})
-            instruction_following = annotations.get('helpfulness', {})
-            rating = instruction_following.get('Rating', 'Unknown rating')
-            rationale = instruction_following.get('Rationale', 'No rationale provided')
-            md5hash = lambda s: str(int(hashlib.md5(s.encode('utf-8')).hexdigest(), 16))
-            return {
-                'question': example['instruction'],
-                'response': response,
-                'evaluation': f"Rating: {rating}\nRationale: {rationale}",
-                'id': md5hash(str(example['instruction']))
-            }
-        except:
-            return None
-
-    train_dataset = [x for d in train_dataset for j in range(4) if (x := reformat(d, j)) is not None]
-    test_dataset = [x for d in test_dataset for j in range(4) if (x := reformat(d, j)) is not None]
-
-    # Construct few-shot prompt using Instruction, Question, Response, and Rationale
-    def construct_fewshot_prompt(dataset, num_examples=5, char_limit=1000, max_attempts=50):
-        prompt = (
-            "You are an evaluator of text quality. Your task is to evaluate the helpfulness of responses.\n\n"
-            "CRITICAL FORMAT RULES:\n"
-            "1. Your response MUST be exactly two lines:\n"
-            "   Rating: <number 1-5>\n"
-            "   Rationale: <one sentence explanation>\n"
-            "2. Do not include any other text, labels, or information\n"
-            "3. Keep rationales brief and focused\n"
-            "4. Do not repeat the question or instruction in your rationale\n"
-            "5. Do not include 'Evaluation:' or any other prefix\n"
-            "6. Do not include any text after the rationale\n"
-            "7. Your response MUST end after the rationale\n\n"
-            "Examples:\n\n"
-        )
-        used_indices = set()
-        added = 0
-        attempts = 0
-
-        while added < num_examples and attempts < max_attempts:
-            idx = random.randint(0, len(dataset) - 1)
-            if idx in used_indices:
-                attempts += 1
-                continue
-
-            used_indices.add(idx)
-            example = dataset[idx]
-            question = example['question']
-            response = example['response']
-            evaluation = example['evaluation']
-
-            example_text = f"Question: {question}\nResponse: {response}\nEvaluation: {evaluation}\n\n"
-
-            if len(example_text) <= char_limit:
-                prompt += example_text
-                added += 1
-            else:
-                # If too long, skip and try another example
-                attempts += 1
-
-        if added < num_examples:
-            print(f"Warning: Only added {added}/{num_examples} examples due to character limit.")
-
-        prompt += (
-            "Now evaluate the following response. Remember:\n"
-            "- Use EXACTLY two lines\n"
-            "- First line: Rating: <number 1-5>\n"
-            "- Second line: Rationale: <one sentence>\n"
-            "- Do not include any other text\n"
-            "- Do not include 'Evaluation:' or any prefix\n"
-            "- Your response MUST end after the rationale\n"
-            "- Write END after your response\n\n"
-        )
-        return prompt
-
-    def clean_evaluation(text):
-        """Sanitize model output to the expected two-line format."""
-        if "Rating:" in text:
-            text = text[text.index("Rating:") :]
-        if "END" in text:
-            text = text[: text.index("END")]
-        # Remove common prefixes the model sometimes adds
-        for prefix in ["Answer:", "Evaluation:"]:
-            if text.startswith(prefix):
-                text = text[len(prefix) :].lstrip()
-        lines = text.strip().split("\n")
-        if len(lines) >= 2:
-            return "\n".join(lines[:2])
-        return text.strip()
-
-     # Initialize model
-    model = utils.init_model(args)
-    entailment_model = EntailmentDeberta()
-    few_shot_prompt = construct_fewshot_prompt(train_dataset, num_examples=args.num_few_shot)
 
 
-    # Process each split
-    # Construct few-shot prompt for this specific example
-    few_shot_prompt = construct_fewshot_prompt(train_dataset, num_examples=args.num_few_shot)
-
-    for dataset_split, dataset in [('train', train_dataset), ('validation', test_dataset)]:
-        print(f"Generating evaluations for {dataset_split} split")
-        generations = {}
-
-        # Limit to a small subset for efficiency
-        indices = range(min(args.num_samples, len(dataset)))
-
-        for index in indices:
-            example = dataset[index]
-            question = example["question"]
-            test_response = example["response"]  # Use the dataset's response as the answer to evaluate
-            generations[example['id']] = {
-                'context': question,
-                'question': "Evaluate the following model response: " + test_response,
-                'responses': []  # initialize the responses key
-            }
-
-            # Combine few-shot prompt with current input
-            current_input = f"Question: {question}\nResponse: {test_response}\nEvaluation:"
-            local_prompt = few_shot_prompt + current_input
-
-            # Print the full prompt before generating evaluations
-            print("Few-shot prompt constructed:")
-            print(local_prompt)
-
-            num_generations = 10
-            prompts = [local_prompt] * num_generations
-            results = model.batch_predict(prompts, temperature=args.temperature, return_latent=True)
-
-            responses, log_liks, embeddings = [], [], []
-            for predicted_answer, token_log_likelihoods, (embedding, _, _) in results:
-                predicted_answer = clean_evaluation(predicted_answer)
-                embedding = embedding.cpu() if embedding is not None else None
-                responses.append(predicted_answer)
-                log_liks.append(token_log_likelihoods)
-                embeddings.append(embedding)
-                print(f"Answer: {predicted_answer.replace(chr(10), ' ')}")
-
-            # Compute semantic entropy using entailment-based clustering
-            try:
-                semantic_ids = get_semantic_ids(responses, model=entailment_model, example=example)
-                entropy = cluster_assignment_entropy(semantic_ids)
-            except Exception as e:
-                print(f"Error computing semantic entropy: {e}")
-                entropy = 0.0
-
-            print(f"Semantic Entropy: {entropy:.4f}")
-
-            generations[example['id']].update({
-                'responses': list(zip(responses, log_liks, embeddings)),
-                'most_likely_answer': {
-                    'response': responses[0],
-                    'embedding': embeddings[0],
-                },
-                'entropy': entropy,
-                'reference': example['response']
-            })
-
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-            gc.collect()
-
-        utils.save(generations, f'{dataset_split}_generations.pkl', save_dir="/workspace/sep-temp")
-
-    print("Run complete.")
-    del model
-
-if __name__ == '__main__':
+# --------------------------------------------------------------------------- #
+#  Entry-point                                                                #
+# --------------------------------------------------------------------------- #
+if __name__ == "__main__":
     parser = utils.get_parser()
-    parser.add_argument("--num_few_shot", type=int, default=2, help="Number of few-shot examples")
+    parser.add_argument("--num_few_shot", type=int, default=3,
+                        help="number of few-shot examples in the prompt")
     args = parser.parse_args()
     print(f"Starting run with args: {args}")
     main(args)
