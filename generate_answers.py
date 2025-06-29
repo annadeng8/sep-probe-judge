@@ -208,6 +208,7 @@ def main(args):
     print("Run complete.")
     del model
     torch.cuda.empty_cache()
+    time.sleep(600000)
 
 
 # --------------------------------------------------------------------------- #
