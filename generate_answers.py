@@ -13,6 +13,9 @@ Revision notes
 • **prints entropy** for every kept batch
 • **NEW**: shuffle train/validation example order so the same question
   is not repeatedly pulled
+
+***Current hot-fix***  
+  – format filtering turned **off** (no answers discarded for bad format)
 """
 import re
 import gc
@@ -30,7 +33,7 @@ from uncertainty.semantic_entropy import (
 )
 
 # --------------------------------------------------------------------------- #
-#  Strict evaluation-line regexes                                             #
+#  Regexes kept for possible future use                                       #
 # --------------------------------------------------------------------------- #
 RATING_RE    = re.compile(r"^Rating:\s*[1-5]\s*$", re.I)
 RATIONALE_RE = re.compile(r"^Rationale:\s*\S.*$",  re.I)
@@ -38,24 +41,18 @@ RATIONALE_RE = re.compile(r"^Rationale:\s*\S.*$",  re.I)
 
 def clean_evaluation(text: str) -> str | None:
     """
-    Keep only answers that match the exact two-line format:
-        Rating: <1-5>
-        Rationale: <non-empty …>
-    Return the cleaned string or None (discard) if malformed.
+    **Relaxed**: simply return the *first two non-empty lines* (if any).
+    No regex validation – everything passes the filter.
     """
+    ### RELAX FILTER – do **not** check regex; keep whatever comes first
     if "Rating:" in text:
         text = text[text.index("Rating:") :]
     if "END" in text:
         text = text[: text.index("END")]
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if len(lines) < 2:
-        return None
-    rating, rationale = lines[:2]
-    if not RATING_RE.fullmatch(rating):
-        return None
-    if not RATIONALE_RE.fullmatch(rationale):
-        return None
-    return f"{rating}\n{rationale}"
+        return None                # still need at least two lines
+    return f"{lines[0]}\n{lines[1]}"
 
 
 # --------------------------------------------------------------------------- #
