@@ -14,8 +14,9 @@ Revision notes
 • **NEW**: shuffle train/validation example order so the same question
   is not repeatedly pulled
 
-***Current hot-fix***  
+***Current hot-fix***
   – format filtering turned **off** (no answers discarded for bad format)
+  – now prints progress `example/total` after every kept batch
 """
 import re
 import gc
@@ -41,17 +42,16 @@ RATIONALE_RE = re.compile(r"^Rationale:\s*\S.*$",  re.I)
 
 def clean_evaluation(text: str) -> str | None:
     """
-    **Relaxed**: simply return the *first two non-empty lines* (if any).
+    **Relaxed**: simply return the first two non-empty lines (if any).
     No regex validation – everything passes the filter.
     """
-    ### RELAX FILTER – do **not** check regex; keep whatever comes first
     if "Rating:" in text:
         text = text[text.index("Rating:") :]
     if "END" in text:
         text = text[: text.index("END")]
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if len(lines) < 2:
-        return None                # still need at least two lines
+        return None  # still need at least two lines
     return f"{lines[0]}\n{lines[1]}"
 
 
@@ -205,6 +205,9 @@ def main(args):
                 "reference": resp,
             }
             collected += 1
+
+            # --- progress ----------------------------------------------------
+            print(f"Progress: {collected}/{args.num_samples} examples processed")  # <-- NEW
 
         utils.save(
             generations, f"{split_name}_generations.pkl",
