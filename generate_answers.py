@@ -108,22 +108,23 @@ def main(args):
             "   Rationale: <one sentence explanation>\n"
             "2. Do not include any other text, labels, or information\n"
             "3. Keep rationales brief and focused\n"
-            "4. Do not repeat the question or instruction in your rationale\n"
-            "5. Do not include 'Evaluation:' or any prefix\n"
-            "6. Do not include any text after the rationale\n"
+            "4. Do NOT repeat the question or instruction in your rationale\n"
+            "5. Do NOT include 'Question:' or any prefix\n"
+            "6. Do NOT include any text after the rationale\n"
             "7. Your response MUST end after the rationale\n\n"
-            "Examples:\n\n"
+            "Here are some examples of how to evaluate responses:\n\n"
         )
         for ex in random.sample(dataset, k):
             snippet = (
-                f"Question: {ex['question']}\n"
-                f"Response: {ex['response']}\n"
-                f"Evaluation: {ex['evaluation']} END\n\n"
+                f"Example Question: {ex['question']}\n"
+                f"Example Response: {ex['response']}\n"
+                f"Example Evaluation: {ex['evaluation']}\n\n"
             )
             prompt += snippet[:limit]
         prompt += (
-            "Now evaluate the following response. Remember the exact two-line format. "
-            "Write END after your response.\n\n"
+            "Now evaluate the following NEW question and response. "
+            "Focus ONLY on the question and response below. "
+            "Do NOT reference any of the examples above.\n\n"
         )
         return prompt
 
@@ -161,7 +162,7 @@ def main(args):
             attempts = 0
             while len(responses) < 10 and attempts < 40:
                 attempts += 1
-                ans, tls, (e_last, *_rest) = model.batch_predict(
+                ans, tls, (e_last, slt_embedding, tbg_embedding) = model.batch_predict(
                     [lp], temperature=args.temperature, return_latent=True
                 )[0]
                 clean = clean_evaluation(ans)
@@ -169,14 +170,14 @@ def main(args):
                     continue
                 responses.append(clean)
                 log_liks.append(tls)
-                embeds.append(e_last)
+                embeds.append(e_last)  # Use last generated token embedding, not prompt embedding
 
             if len(responses) < 3:
                 continue
 
             # ----- Entropy ---------------------------------------------------
             try:
-                sem_ids = get_semantic_ids(responses, entailment_model, ex)
+                sem_ids = get_semantic_ids(responses, entailment_model, strict_entailment=False, example=ex)
                 entropy = cluster_assignment_entropy(sem_ids)
             except Exception:
                 continue
@@ -217,7 +218,7 @@ def main(args):
     print("Run complete.")
     del model
     torch.cuda.empty_cache()
-    time.sleep(600000)
+
 
 
 # --------------------------------------------------------------------------- #

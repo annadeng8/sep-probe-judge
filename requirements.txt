@@ -1,6 +1,6 @@
 tqdm 
 datasets 
-transformers==4.46.3
+transformers==4.48.0
 wandb 
 evaluate  
 openai 
@@ -11,4 +11,4 @@ scikit-learn
 tenacity
 sentencepiece
 tiktoken
-torch==2.4.1
+torch==2.6
