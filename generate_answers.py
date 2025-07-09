@@ -170,7 +170,7 @@ def main(args):
                     continue
                 responses.append(clean)
                 log_liks.append(tls)
-                embeds.append(e_last)  # Use last generated token embedding, not prompt embedding
+                embeds.append(tbg_embedding)  # Use last generated token embedding, not prompt embedding
 
             if len(responses) < 3:
                 continue
