@@ -4,11 +4,11 @@ Generate evaluations with LLM, cache activations, and compute entropy with few-s
 
 Revision notes
 --------------
-• keep the entire two-line evaluation in `responses`
+• keep the entire two-line evaluation in responses
 • print the prompt and *every* sampled answer to stdout
-• **strict `clean_evaluation()`** – only accept answers that
-    ▸ have “Rating:” 1-5
-    ▸ have a non-empty “Rationale: …”
+• **strict clean_evaluation()** – only accept answers that
+    ▸ have "Rating:" 1-5
+    ▸ have a non-empty "Rationale: …"
 • malformed answers are silently skipped
 • **prints entropy** for every kept batch
 • **NEW**: shuffle train/validation example order so the same question
@@ -16,7 +16,7 @@ Revision notes
 
 ***Current hot-fix***
   – format filtering turned **off** (no answers discarded for bad format)
-  – now prints progress `example/total` after every kept batch
+  – now prints progress example/total after every kept batch
 """
 import re
 import gc
@@ -94,7 +94,7 @@ def main(args):
 
     train_ds, test_ds = unpack(train_raw), unpack(test_raw)
 
-    # -------- NEW: shuffle so we don’t keep seeing the same example ----------
+    # -------- NEW: shuffle so we don't keep seeing the same example ----------
     random.shuffle(train_ds)
     random.shuffle(test_ds)
 
@@ -114,13 +114,12 @@ def main(args):
             "7. Your response MUST end after the rationale\n\n"
             "Here are some examples of how to evaluate responses:\n\n"
         )
-        for ex in random.sample(dataset, k):
-            snippet = (
-                f"Example Question: {ex['question']}\n"
-                f"Example Response: {ex['response']}\n"
-                f"Example Evaluation: {ex['evaluation']}\n\n"
-            )
-            prompt += snippet[:limit]
+        for i, ex in enumerate(random.sample(dataset, k), 1):
+            prompt += f"=== EXAMPLE {i} ===\n\n"
+            prompt += f"EXAMPLE QUESTION:\n{ex['question']}\n\n"
+            prompt += f"EXAMPLE RESPONSE:\n{ex['response']}\n\n"
+            prompt += f"EXAMPLE EVALUATION:\n{ex['evaluation']}\n\n"
+            prompt += "=" * 50 + "\n\n"
         prompt += (
             "Now evaluate the following NEW question and response. "
             "Focus ONLY on the question and response below. "
