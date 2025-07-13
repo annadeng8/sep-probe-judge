@@ -212,7 +212,7 @@ def main(args):
 
         utils.save(
             generations, f"{split_name}_generations.pkl",
-            save_dir="/workspace/sep-temp"
+            save_dir="/workspace/sep-probe-judge"
         )
 
     print("Run complete.")
