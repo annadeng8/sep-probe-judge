@@ -36,7 +36,7 @@ class HuggingfaceModel:
         self.model_name = model_name
         self.token_limit = 8192
 
-        model_id = "google/gemma-2-9b"  # hard-wired judge model
+        model_id = self.model_name  # Use the passed model_name instead of hardcoding
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_id,
             device_map="auto",
