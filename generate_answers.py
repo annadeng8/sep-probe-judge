@@ -102,7 +102,7 @@ def main(args):
     # -------- 3. FEW-SHOT PROMPT --------------------------------------------
     # --- NEW line: re-seed random to undo the fixed seed from semantic_entropy
     random.seed()                 # <--- ensures different few-shot sets each run
-    def fewshot(dataset, k=2, limit=1000):
+    def fewshot(dataset, k=3, limit=1000):
         prompt = (
             "Evaluate each response for helpfulness. Your answer MUST be two lines:\n"
             "Rating: <1-5>\n"
@@ -222,7 +222,7 @@ def main(args):
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     parser = utils.get_parser()
-    parser.add_argument("--num_few_shot", type=int, default=3,
+    parser.add_argument("--num_few_shot", type=int, default=2,
                         help="number of few-shot examples in the prompt")
     args = parser.parse_args()
     print(f"Starting run with args: {args}")
