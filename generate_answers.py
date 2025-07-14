@@ -6,17 +6,18 @@ Revision notes
 --------------
 • keep the entire two-line evaluation in responses
 • print the prompt and *every* sampled answer to stdout
-• **strict clean_evaluation()** – only accept answers that
-    ▸ have "Rating:" 1-5
-    ▸ have a non-empty "Rationale: …"
+• strict clean_evaluation() – only accept answers that
+    ▸ have “Rating:” 1-5
+    ▸ have a non-empty “Rationale: …”
 • malformed answers are silently skipped
-• **prints entropy** for every kept batch
-• **NEW**: shuffle train/validation example order so the same question
-  is not repeatedly pulled
+• prints entropy for every kept batch
+• shuffle train/validation example order so the same question is not repeatedly pulled
 
 ***Current hot-fix***
   – format filtering turned **off** (no answers discarded for bad format)
-  – now prints progress example/total after every kept batch
+  – prints progress example/total after every kept batch
+  – **NEW**: re-seed `random` before building the few-shot prompt so the
+    examples are truly different each run
 """
 import re
 import gc
@@ -94,11 +95,13 @@ def main(args):
 
     train_ds, test_ds = unpack(train_raw), unpack(test_raw)
 
-    # -------- NEW: shuffle so we don't keep seeing the same example ----------
+    # -------- NEW: shuffle so we don’t keep seeing the same example ----------
     random.shuffle(train_ds)
     random.shuffle(test_ds)
 
     # -------- 3. FEW-SHOT PROMPT --------------------------------------------
+    # --- NEW line: re-seed random to undo the fixed seed from semantic_entropy
+    random.seed()                 # <--- ensures different few-shot sets each run
     def fewshot(dataset, k=3, limit=1000):
         prompt = (
             "You are an evaluator of text quality. Your task is to evaluate the helpfulness of responses.\n\n"
@@ -161,7 +164,7 @@ def main(args):
             attempts = 0
             while len(responses) < 10 and attempts < 40:
                 attempts += 1
-                ans, tls, (e_last, slt_embedding, tbg_embedding) = model.batch_predict(
+                ans, tls, (e_last, slt_emb, tbg_emb) = model.batch_predict(
                     [lp], temperature=args.temperature, return_latent=True
                 )[0]
                 clean = clean_evaluation(ans)
@@ -169,14 +172,17 @@ def main(args):
                     continue
                 responses.append(clean)
                 log_liks.append(tls)
-                embeds.append(tbg_embedding)  # Use last generated token embedding, not prompt embedding
+                embeds.append(tbg_emb)  # last generated token embedding
 
             if len(responses) < 3:
                 continue
 
             # ----- Entropy ---------------------------------------------------
             try:
-                sem_ids = get_semantic_ids(responses, entailment_model, strict_entailment=False, example=ex)
+                sem_ids = get_semantic_ids(
+                    responses, entailment_model,
+                    strict_entailment=False, example=ex
+                )
                 entropy = cluster_assignment_entropy(sem_ids)
             except Exception:
                 continue
@@ -207,7 +213,7 @@ def main(args):
             collected += 1
 
             # --- progress ----------------------------------------------------
-            print(f"Progress: {collected}/{args.num_samples} examples processed")  # <-- NEW
+            print(f"Progress: {collected}/{args.num_samples} examples processed")
 
         utils.save(
             generations, f"{split_name}_generations.pkl",
@@ -217,7 +223,6 @@ def main(args):
     print("Run complete.")
     del model
     torch.cuda.empty_cache()
-
 
 
 # --------------------------------------------------------------------------- #
