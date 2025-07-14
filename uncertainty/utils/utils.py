@@ -21,6 +21,6 @@ def get_parser():
     parser = ArgumentParser()
     parser.add_argument("--model_name", type=str, default="google/gemma-2-2b", help="Model name")
     parser.add_argument("--model_max_new_tokens", type=int, default=100, help="Max tokens to generate")
-    parser.add_argument("--num_samples", type=int, default=600, help="Number of samples to process")
-    parser.add_argument("--temperature", type=float, default=1, help="Sampling temperature")
+    parser.add_argument("--num_samples", type=int, default=400, help="Number of samples to process")
+    parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
     return parser

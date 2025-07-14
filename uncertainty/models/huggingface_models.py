@@ -1,28 +1,20 @@
-"""Minimal Huggingface model implementation."""
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import torch._dynamo
-from transformers import StoppingCriteria, StoppingCriteriaList
-import torch.nn.functional as F
+"""Minimal Huggingface model implementation (stop at END, full latents, clipped n_gen without error logs)."""
 
+import warnings
+warnings.filterwarnings("ignore", message=".*HybridCache.*")
+
+import torch
+import torch._dynamo
+from transformers import AutoTokenizer, AutoModelForCausalLM, StoppingCriteria, StoppingCriteriaList
 
 torch._dynamo.config.suppress_errors = True
 
-from transformers import LogitsProcessor
-from transformers import LogitsProcessorList
-
-
-class PenalizeTokenProcessor(LogitsProcessor):
-    def __init__(self, token_id: int, penalty: float):
-        self.token_id = token_id
-        self.penalty = penalty  # positive value → lower probability
-
-    def __call__(self, input_ids, scores):
-        # Subtract penalty from the target token
-        scores[:, self.token_id] -= self.penalty
-        return scores
 
 class StopWordsCriteria(StoppingCriteria):
+    """
+    Stop generation once any of the stop strings appears **after** the prompt.
+    """
+
     def __init__(self, stop_strings, tokenizer, input_ids):
         super().__init__()
         self.stop_strings = stop_strings
@@ -30,132 +22,108 @@ class StopWordsCriteria(StoppingCriteria):
         self.input_len = input_ids.shape[1]
 
     def __call__(self, input_ids, scores, **kwargs):
-        # Decode only the newly generated tokens
-        decoded = self.tokenizer.batch_decode(input_ids[:, self.input_len:], skip_special_tokens=True)
-        for text in decoded:
-            if any(stop_string in text for stop_string in self.stop_strings):
-                print("STOPPING CRITERIA EVOKED")
-                return True  # Stop generation
-        return False
+        decoded = self.tokenizer.batch_decode(
+            input_ids[:, self.input_len:], skip_special_tokens=True
+        )
+        return any(any(s in d for s in self.stop_strings) for d in decoded)
+
 
 class HuggingfaceModel:
-    """Simplified Huggingface model for generation and activation caching."""
-    def __init__(self, model_name, max_new_tokens):
+    """Simplified wrapper for generation + hidden-state capture."""
+
+    def __init__(self, model_name: str, max_new_tokens: int):
         self.max_new_tokens = max_new_tokens
-        model_id = "google/gemma-2-2b"
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id, device_map='auto', token_type_ids=None, clean_up_tokenization_spaces=False)
-        self.model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=True, torch_dtype=torch.bfloat16, device_map='auto')
         self.model_name = model_name
         self.token_limit = 8192
-    def batch_predict(self, prompts, temperature, return_latent=False, batch_size=10):
-        """Generate answers for a batch of prompts and return text, log-likelihoods, and embeddings if requested."""
-        import torch
+
+        model_id = "google/gemma-2-2b"  # hard-wired judge model
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_id,
+            device_map="auto",
+            token_type_ids=None,
+            clean_up_tokenization_spaces=False,
+        )
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+        )
+
+    def batch_predict(
+        self,
+        prompts,
+        temperature: float,
+        *,
+        return_latent: bool = False,
+        batch_size: int = 10,
+    ):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         results = []
 
-        for batch_start in range(0, len(prompts), batch_size):
-            batch_prompts = prompts[batch_start:batch_start + batch_size]
+        for b0 in range(0, len(prompts), batch_size):
+            batch = prompts[b0 : b0 + batch_size]
 
-            # Tokenize batch prompts
-            encoded = self.tokenizer(
-                batch_prompts,
+            enc = self.tokenizer(
+                batch,
                 padding=True,
                 truncation=True,
                 max_length=self.token_limit - self.max_new_tokens,
-                return_tensors="pt"
+                return_tensors="pt",
             ).to(device)
 
-                # Define your stop strings
-            # stop_strings = ["\n\n", "Question:", "Q:", "Context:", "Now, provide", "Use exactly", "Evaluation", "Thank you"]
-            stop_strings = ["Q:", "Context:"]
+            criteria = StoppingCriteriaList(
+                [StopWordsCriteria(["Q:", "Context:", "END"], self.tokenizer, enc["input_ids"])]
+            )
 
-            # Build stopping criteria
-            stop_criteria = StoppingCriteriaList([
-                StopWordsCriteria(stop_strings, self.tokenizer, encoded["input_ids"])
-            ])
-
-            allowed_keys = {"input_ids", "attention_mask"}
-            safe_encoded = {k: v for k, v in encoded.items() if k in allowed_keys}
-
-
-            target_token = self.tokenizer.encode("Question:", add_special_tokens=False)[0]
-            penalty = 10.0  # large → lower probability a lot
-
-            """
-            logits_processor = LogitsProcessorList([
-                PenalizeTokenProcessor(token_id=target_token, penalty=penalty)
-            ])
-            """
-
-
-            # Now call generate with stopping_criteria
             with torch.no_grad():
-                outputs = self.model.generate(
-                    **safe_encoded,
+                gen = self.model.generate(
+                    input_ids=enc["input_ids"],
+                    attention_mask=enc["attention_mask"],
                     max_new_tokens=self.max_new_tokens,
-                    #logits_processor=logits_processor,
+                    stopping_criteria=criteria,
                     return_dict_in_generate=True,
                     output_scores=True,
                     output_hidden_states=True,
                     temperature=temperature,
                     do_sample=True,
+                    top_p=0.85,
+                    top_k=50,
                     pad_token_id=self.tokenizer.eos_token_id,
-                    #stopping_criteria=stop_criteria,
-                    top_p = 0.85,
-                    top_k = 50,
-                    )
-            
-            """
-            for step_idx, step_logits in enumerate(outputs.scores):  # one per generated token
-                probs = F.softmax(step_logits, dim=-1)  # shape: (batch_size, vocab_size)
-
-                # Example: log top 5 tokens for sample 0
-                topk = torch.topk(probs[0], k=5)
-                print(f"\n[Step {step_idx}] Top-5 token probabilities:")
-                for prob, token_id in zip(topk.values.tolist(), topk.indices.tolist()):
-                    decoded = self.tokenizer.decode([token_id])
-                    print(f"  {decoded!r}: {prob:.4f}")
-            """
-            
-            """
-            eos_token_id = self.tokenizer.eos_token_id
-            for i, sequence in enumerate(outputs.sequences):
-                if eos_token_id in sequence:
-                    print(f"[EOS Detected] Sample {i} includes eos_token_id ({eos_token_id})")
-                    # Optional: where in the sequence
-                    eos_positions = (sequence == eos_token_id).nonzero(as_tuple=True)[0].tolist()
-                    print(f" → EOS token found at indices: {eos_positions}")
-
-                else:
-                    print(f"[EOS Not Found] Sample {i} did not include eos_token_id")
-            """
-
-            # ---- FIXED SECTION ----
-            # last layer → shape (batch, seq_len, hidden_size)
-            
-            hidden_states      = outputs.hidden_states[0][-1][0,0]
-            last_token_embedding = hidden_states.cpu()
-            
-            for i, prompt in enumerate(batch_prompts):
-                full_answer   = self.tokenizer.decode(outputs.sequences[i], skip_special_tokens=True)
-                sliced_answer = full_answer[len(prompt):].strip()
-
-                # Prompt / generation lengths
-                token_stop_index = self.tokenizer(full_answer, return_tensors="pt")["input_ids"].shape[1]
-                n_input_token    = encoded["input_ids"][i].ne(self.tokenizer.pad_token_id).sum().item()
-                n_generated      = token_stop_index - n_input_token or 1
-
-                # -----------------------
-
-                # Log-likelihoods for generated tokens
-                transition_scores = self.model.compute_transition_scores(
-                    outputs.sequences, outputs.scores, normalize_logits=True
                 )
-                log_likelihoods = [score.item() for score in transition_scores[i][:n_generated]]
 
-                if return_latent:
-                    results.append((sliced_answer, log_likelihoods, (last_token_embedding, None, None)))
-                else:
-                    results.append((sliced_answer, log_likelihoods, None))
+            hid_steps = gen.hidden_states  # tuple(len = #generated tokens)
+
+            for idx, prompt in enumerate(batch):
+                full = self.tokenizer.decode(gen.sequences[idx], skip_special_tokens=True)
+                tail = full[len(prompt):]
+                pos = tail.find("END")
+                slice_txt = tail[:pos].strip() if pos != -1 else tail.strip()
+
+                tok_ids = self.tokenizer(
+                    full[: len(prompt) + len(slice_txt)], return_tensors="pt"
+                )["input_ids"]
+                tok_stop = tok_ids.shape[1]
+                n_prompt = (enc["input_ids"][idx] != self.tokenizer.pad_token_id).sum().item()
+                n_gen = max(tok_stop - n_prompt, 1)
+                # clip without logging
+                if n_gen > len(hid_steps):
+                    n_gen = len(hid_steps)
+
+                last_emb = hid_steps[n_gen - 1][-1][idx, -1, :].cpu()
+                sec_emb = (
+                    torch.stack([l[idx, -1, :] for l in hid_steps[n_gen - 2]]).cpu()
+                    if n_gen >= 2
+                    else None
+                )
+                pre_emb = torch.stack([l[idx, -1, :] for l in hid_steps[0]]).cpu()
+
+                trans = self.model.compute_transition_scores(
+                    gen.sequences, gen.scores, normalize_logits=True
+                )
+                log_liks = [s.item() for s in trans[idx][:n_gen]]
+
+                lat = (last_emb, sec_emb, pre_emb) if return_latent else None
+                results.append((slice_txt, log_liks, lat))
 
         return results
