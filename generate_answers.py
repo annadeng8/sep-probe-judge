@@ -12,12 +12,6 @@ Revision notes
 • malformed answers are silently skipped
 • prints entropy for every kept batch
 • shuffle train/validation example order so the same question is not repeatedly pulled
-
-***Current hot-fix***
-  – format filtering turned **off** (no answers discarded for bad format)
-  – prints progress example/total after every kept batch
-  – **NEW**: re-seed `random` before building the few-shot prompt so the
-    examples are truly different each run
 """
 import re
 import gc
@@ -35,7 +29,7 @@ from uncertainty.semantic_entropy import (
 )
 
 # --------------------------------------------------------------------------- #
-#  Regexes kept for possible future use                                       #
+#  Regexes for strict validation                                              #
 # --------------------------------------------------------------------------- #
 RATING_RE    = re.compile(r"^Rating:\s*[1-5]\s*$", re.I)
 RATIONALE_RE = re.compile(r"^Rationale:\s*\S.*$",  re.I)
@@ -43,8 +37,8 @@ RATIONALE_RE = re.compile(r"^Rationale:\s*\S.*$",  re.I)
 
 def clean_evaluation(text: str) -> str | None:
     """
-    **Relaxed**: simply return the first two non-empty lines (if any).
-    No regex validation – everything passes the filter.
+    Strictly validate and clean the evaluation response.
+    Only accept responses with proper "Rating: [1-5]" and "Rationale: <non-empty>" formats.
     """
     if "Rating:" in text:
         text = text[text.index("Rating:") :]
@@ -52,7 +46,9 @@ def clean_evaluation(text: str) -> str | None:
         text = text[: text.index("END")]
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if len(lines) < 2:
-        return None  # still need at least two lines
+        return None
+    if not RATING_RE.match(lines[0]) or not RATIONALE_RE.match(lines[1]):
+        return None
     return f"{lines[0]}\n{lines[1]}"
 
 
@@ -142,7 +138,7 @@ def main(args):
 
             # ----- Greedy ----------------------------------------------------
             try:
-                g_ans, _, (g_last, g_sec, g_pre) = model.batch_predict(
+                g_ans, _, latents = model.batch_predict(
                     [lp], temperature=0.1, return_latent=True
                 )[0]
                 greedy = clean_evaluation(g_ans)
@@ -156,7 +152,7 @@ def main(args):
             attempts = 0
             while len(responses) < 10 and attempts < 40:
                 attempts += 1
-                ans, tls, (e_last, slt_emb, tbg_emb) = model.batch_predict(
+                ans, tls, lat = model.batch_predict(
                     [lp], temperature=args.temperature, return_latent=True
                 )[0]
                 clean = clean_evaluation(ans)
@@ -164,7 +160,7 @@ def main(args):
                     continue
                 responses.append(clean)
                 log_liks.append(tls)
-                embeds.append(tbg_emb)  # last generated token embedding
+                embeds.append(lat["slt_emb"])  # Use SLT hidden states
 
             if len(responses) < 3:
                 continue
@@ -195,9 +191,10 @@ def main(args):
                 "responses": list(zip(responses, log_liks, embeds)),
                 "most_likely_answer": {
                     "response": greedy,
-                    "last_embedding": g_last,
-                    "sec_last_embedding": g_sec,
-                    "prompt_last_embedding": g_pre,
+                    "last_embedding": latents["last_emb"],
+                    "sec_last_embedding": latents["sec_emb"],
+                    "prompt_last_embedding": latents["pre_emb"],
+                    "slt_embedding": latents["slt_emb"],
                 },
                 "entropy": entropy,
                 "reference": resp,
@@ -206,6 +203,26 @@ def main(args):
 
             # --- progress ----------------------------------------------------
             print(f"Progress: {collected}/{args.num_samples} examples processed")
+
+        # -------- 6. BINARIZE ENTROPY ---------------------------------------
+        if generations:
+            entropies = [g["entropy"] for g in generations.values()]
+
+            def find_optimal_threshold(entropies):
+                best_gamma, best_mse = None, float("inf")
+                for gamma in np.linspace(min(entropies), max(entropies), 100):
+                    low = [e for e in entropies if e < gamma]
+                    high = [e for e in entropies if e >= gamma]
+                    if not low or not high:
+                        continue
+                    mse = sum((e - np.mean(low))**2 for e in low) + sum((e - np.mean(high))**2 for e in high)
+                    if mse < best_mse:
+                        best_mse, best_gamma = mse, gamma
+                return best_gamma
+
+            gamma_star = find_optimal_threshold(entropies)
+            for gid, gen in generations.items():
+                gen["binarized_entropy"] = 1 if gen["entropy"] > gamma_star else 0
 
         utils.save(
             generations, f"{split_name}_generations.pkl",
