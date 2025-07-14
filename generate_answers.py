@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Generate evaluations with LLM, cache activations, and compute entropy with few-shot prompting.
 
