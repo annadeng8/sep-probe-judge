@@ -104,29 +104,21 @@ def main(args):
     random.seed()                 # <--- ensures different few-shot sets each run
     def fewshot(dataset, k=2, limit=1000):
         prompt = (
-            "You are an evaluator of text quality. Your task is to evaluate the helpfulness of responses.\n\n"
-            "CRITICAL FORMAT RULES:\n"
-            "1. Your response MUST be exactly two lines:\n"
-            "   Rating: <number 1-5>\n"
-            "   Rationale: <one sentence explanation>\n"
-            "2. Do not include any other text, labels, or information\n"
-            "3. Keep rationales brief and focused\n"
-            "4. Do NOT repeat the question or instruction in your rationale\n"
-            "5. Do NOT include 'Question:' or any prefix\n"
-            "6. Do NOT include any text after the rationale\n"
-            "7. Your response MUST end after the rationale\n\n"
-            "Here are some examples of how to evaluate responses:\n\n"
+            "Evaluate each response for helpfulness. Your answer MUST be two lines:\n"
+            "Rating: <1-5>\n"
+            "Rationale: <short explanation>\n"
+            "Do not add anything else. End after the rationale.\n\n"
+            "=== EXAMPLES ===\n\n"
         )
         for i, ex in enumerate(random.sample(dataset, k), 1):
-            prompt += f"=== EXAMPLE {i} ===\n\n"
+            prompt += f"{'='*20} EXAMPLE {i} {'='*20}\n"
             prompt += f"EXAMPLE QUESTION:\n{ex['question']}\n\n"
             prompt += f"EXAMPLE RESPONSE:\n{ex['response']}\n\n"
-            prompt += f"EXAMPLE EVALUATION:\n{ex['evaluation']}\n\n"
-            prompt += "=" * 50 + "\n\n"
+            prompt += f"EXAMPLE EVALUATION:\n{ex['evaluation']}\n"
+            prompt += f"{'='*50}\n\n"
         prompt += (
-            "Now evaluate the following NEW question and response. "
-            "Focus ONLY on the question and response below. "
-            "Do NOT reference any of the examples above.\n\n"
+            "Now evaluate the following NEW question and response in the same format. "
+            "Only give a two-line answer as above. End after the rationale.\n\n"
         )
         return prompt
 
