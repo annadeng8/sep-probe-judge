@@ -25,5 +25,5 @@ def get_parser():
     parser.add_argument("--model_name", type=str, default="google/gemma-2-9b")
     parser.add_argument("--model_max_new_tokens", type=int, default=100)
     parser.add_argument("--num_samples", type=int, default=3000)
-    parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--temperature", type=float, default=0.8)
     return parser
