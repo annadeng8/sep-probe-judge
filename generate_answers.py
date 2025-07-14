@@ -102,7 +102,7 @@ def main(args):
     # -------- 3. FEW-SHOT PROMPT --------------------------------------------
     # --- NEW line: re-seed random to undo the fixed seed from semantic_entropy
     random.seed()                 # <--- ensures different few-shot sets each run
-    def fewshot(dataset, k=3, limit=1000):
+    def fewshot(dataset, k=2, limit=1000):
         prompt = (
             "You are an evaluator of text quality. Your task is to evaluate the helpfulness of responses.\n\n"
             "CRITICAL FORMAT RULES:\n"
