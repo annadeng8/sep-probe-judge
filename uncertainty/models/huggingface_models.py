@@ -36,7 +36,7 @@ class HuggingfaceModel:
         self.model_name = model_name
         self.token_limit = 8192
 
-        model_id = "meta-llama/Llama-3.1-8B"  # hard-wired judge model
+        model_id = "google/gemma-2-9b"  # hard-wired judge model
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_id,
             device_map="auto",
@@ -110,20 +110,34 @@ class HuggingfaceModel:
                 if n_gen > len(hid_steps):
                     n_gen = len(hid_steps)
 
-                last_emb = hid_steps[n_gen - 1][-1][idx, -1, :].cpu()
+                last_emb = hid_steps[n_gen - 1][-1][idx, -1, :].cpu()  # Last layer, last token
                 sec_emb = (
                     torch.stack([l[idx, -1, :] for l in hid_steps[n_gen - 2]]).cpu()
                     if n_gen >= 2
                     else None
                 )
-                pre_emb = torch.stack([l[idx, -1, :] for l in hid_steps[0]]).cpu()
+                pre_emb = torch.stack([l[idx, -1, :] for l in hid_steps[0]]).cpu()  # All layers, TBG
+
+                # Extract hidden states for all layers at SLT (second last token)
+                if n_gen >= 2:
+                    slt_emb = torch.stack([l[idx, -2, :] for l in hid_steps[n_gen - 2]]).cpu()  # All layers, SLT
+                else:
+                    slt_emb = None  # If only one token generated, SLT doesn't exist
 
                 trans = self.model.compute_transition_scores(
                     gen.sequences, gen.scores, normalize_logits=True
                 )
                 log_liks = [s.item() for s in trans[idx][:n_gen]]
 
-                lat = (last_emb, sec_emb, pre_emb) if return_latent else None
+                if return_latent:
+                    lat = {
+                        "last_emb": last_emb,
+                        "sec_emb": sec_emb,
+                        "pre_emb": pre_emb,
+                        "slt_emb": slt_emb,
+                    }
+                else:
+                    lat = None
                 results.append((slice_txt, log_liks, lat))
 
         return results
