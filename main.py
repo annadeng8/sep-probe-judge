@@ -46,8 +46,8 @@ def save(obj, file, save_dir):
 def get_parser():
     """Return a minimal argument parser."""
     parser = ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.1-8B")
-    parser.add_argument("--model_max_new_tokens", type=int, default=100)
+    parser.add_argument("--model_name", type=str, default="google/gemma-2-9b-it")
+    parser.add_argument("--model_max_new_tokens", type=int, default=300)
     parser.add_argument("--num_samples", type=int, default=600)
     parser.add_argument("--temperature", type=float, default=1.0)
     return parser
@@ -121,6 +121,9 @@ class HuggingfaceModel:
                 return_tensors="pt",
             ).to(device)
 
+            # Ensure input_ids is a tensor
+            assert isinstance(enc["input_ids"], torch.Tensor), "input_ids must be a tensor"
+
             criteria = StoppingCriteriaList(
                 [StopWordsCriteria(["Q:", "Context:", "END"], self.tokenizer, enc["input_ids"])]
             )
@@ -141,7 +144,7 @@ class HuggingfaceModel:
                     pad_token_id=self.tokenizer.eos_token_id,
                 )
 
-            hid_steps = gen.hidden_states
+            hid_steps = gen.hidden_states  # tuple(len = #generated tokens)
 
             for idx, prompt in enumerate(batch):
                 full = self.tokenizer.decode(gen.sequences[idx], skip_special_tokens=True)
@@ -156,8 +159,9 @@ class HuggingfaceModel:
                 n_prompt = (enc["input_ids"][idx] != self.tokenizer.pad_token_id).sum().item()
                 n_gen = max(tok_stop - n_prompt, 1)
                 if n_gen > len(hid_steps):
-                    n_gen = len(hid_steps)
+                    n_gen = len(hid_steps)  # Prevent index out of range
 
+                # Extract embeddings with bounds checking
                 if n_gen > 0 and len(hid_steps) > 0:
                     last_emb = hid_steps[n_gen - 1][-1][idx, -1, :].cpu()
                 else:
@@ -174,7 +178,8 @@ class HuggingfaceModel:
                     pre_emb = None
 
                 if n_gen >= 2 and len(hid_steps) >= 2:
-                    seq_len = hid_steps[n_gen - 2][-1].shape [idx].shape[1]
+                    # **Fixed Line**: Correctly access sequence length from tensor shape
+                    seq_len = hid_steps[n_gen - 2][-1].shape[1]  # Get sequence length from last layer
                     if seq_len >= 2:
                         slt_emb = torch.stack([l[idx, -2, :] for l in hid_steps[n_gen - 2]]).cpu()
                     else:
@@ -302,7 +307,7 @@ def cluster_assignment_entropy(semantic_ids):
 
 
 # --------------------------------------------------------------------------- #
-#  Main program                                                               #
+#  Main Program                                                               #
 # --------------------------------------------------------------------------- #
 def main(args):
     torch.set_grad_enabled(False)
@@ -319,7 +324,7 @@ def main(args):
     def reformat(ex, j):
         try:
             comp = ex["completions"][j]
- swoje            resp = comp.get("response", "No response found")
+            resp = comp.get("response", "No response found")
             ann  = comp.get("annotations", {}).get("helpfulness", {})
             md5  = lambda s: str(int(hashlib.md5(s.encode()).hexdigest(), 16))
             return {
@@ -347,10 +352,15 @@ def main(args):
     # -------- 3. 0-SHOT PROMPT -----------------------------------------------
     def fewshot(dataset, k=0, limit=1000):
         prompt = (
-            "Evaluate each response for helpfulness. Your answer MUST be two lines:\n"
+            "You are a helpful assistant evaluating how helpful a response is to a question.\n"
+            "For each example, you will see:\n"
+            "Question: <the question>\n"
+            "Response: <the response>\n"
+            "Rate the response's helpfulness.\n"
+            "Your answer MUST be exactly two lines in this format:\n"
             "Rating: <1-5>\n"
-            "Rationale: <short explanation>\n"
-            "Do not add anything else. End after the rationale.\n\n"
+            "Rationale: <very brief explanation, only a couple words>\n"
+            "Do not repeat the question or response. Do not add extra text. End after the rationale.\n\n"
         )
         return prompt
 
@@ -401,7 +411,7 @@ def main(args):
                     embeds.append(lat["slt_emb"])
                     print(f"Attempt {attempts}: Got sample ({len(responses)}/10)")
                 except Exception as e:
-                    print(f"Attack {attempts}: Exception in sampling: {e}")
+                    print(f"Attempt {attempts}: Exception in sampling: {e}")
                     continue
 
             print(f"Sampling complete: {len(responses)} responses from {attempts} attempts")
