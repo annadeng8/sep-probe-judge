@@ -36,7 +36,7 @@ class HuggingfaceModel:
         self.model_name = model_name
         self.token_limit = 8192
 
-        model_id = "google/gemma-2-2b"  # hard-wired judge model
+        model_id = "google/gemma-2-9b-it"  # hard-wired judge model
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_id,
             device_map="auto",
@@ -87,7 +87,7 @@ class HuggingfaceModel:
                     output_hidden_states=True,
                     temperature=temperature,
                     do_sample=True,
-                    top_p=0.85,
+                    top_p=0.9,
                     top_k=50,
                     pad_token_id=self.tokenizer.eos_token_id,
                 )
@@ -126,4 +126,23 @@ class HuggingfaceModel:
                 lat = (last_emb, sec_emb, pre_emb) if return_latent else None
                 results.append((slice_txt, log_liks, lat))
 
+        return results
+
+    def get_top_tokens(self, prompts, k=5):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        results = []
+        for prompt in prompts:
+            enc = self.tokenizer(prompt, return_tensors="pt").to(device)
+            with torch.no_grad():
+                outputs = self.model(
+                    input_ids=enc["input_ids"],
+                    attention_mask=enc["attention_mask"],
+                    return_dict=True
+                )
+                logits = outputs.logits[:, -1, :]  # logits for the next token
+                probs = torch.softmax(logits, dim=-1)
+                topk = torch.topk(probs, k)
+                top_tokens = [self.tokenizer.decode([idx]) for idx in topk.indices[0]]
+                top_probs = topk.values[0].cpu().to(torch.float32).numpy()
+                results.append(list(zip(top_tokens, top_probs)))
         return results

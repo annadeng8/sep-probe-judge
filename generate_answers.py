@@ -18,6 +18,7 @@ Revision notes
   – format filtering turned **off** (no answers discarded for bad format)
   – now prints progress `example/total` after every kept batch
 """
+import sys
 import re
 import gc
 import time
@@ -32,6 +33,11 @@ from uncertainty.semantic_entropy import (
     cluster_assignment_entropy,
     EntailmentDeberta,
 )
+
+# Redirect all stdout (and stderr) to a file to capture terminal output
+output_file = open('/workspace/sep-probe-judge/generate_answers_output.txt', 'w')
+sys.stdout = output_file
+sys.stderr = output_file
 
 # --------------------------------------------------------------------------- #
 #  Regexes kept for possible future use                                       #
@@ -159,19 +165,55 @@ def main(args):
 
             # ----- Sampling --------------------------------------------------
             responses, log_liks, embeds = [], [], []
-            attempts = 0
-            while len(responses) < 10 and attempts < 40:
-                attempts += 1
-                ans, tls, (e_last, slt_embedding, tbg_embedding) = model.batch_predict(
-                    [lp], temperature=args.temperature, return_latent=True
-                )[0]
-                clean = clean_evaluation(ans)
-                if clean is None:
-                    continue
-                responses.append(clean)
-                log_liks.append(tls)
-                embeds.append(tbg_embedding)  # Use last generated token embedding, not prompt embedding
-
+            blank_response_infos = []  # To store info about blank responses
+            max_resample_rounds = 3
+            resample_round = 0
+            while resample_round <= max_resample_rounds:
+                batch_responses, batch_log_liks, batch_embeds = [], [], []
+                attempts = 0
+                batch_blank_infos = []
+                while len(batch_responses) < 10 and attempts < 40:
+                    attempts += 1
+                    ans, tls, (e_last, slt_embedding, tbg_embedding) = model.batch_predict(
+                        [lp], temperature=args.temperature, return_latent=True
+                    )[0]
+                    clean = clean_evaluation(ans)
+                    if clean is None or clean.strip() == "":
+                        # Output info for blank model responses
+                        print(f"[BLANK RESPONSE] Attempt {attempts} (Resample round {resample_round}): Raw model output was blank or malformed.")
+                        print(f"Raw output: {repr(ans)}")
+                        # Investigate top tokens if possible
+                        if hasattr(model, 'get_top_tokens'):
+                            top_tokens = model.get_top_tokens([lp])
+                            print(f"Top tokens for blank response: {top_tokens}")
+                        else:
+                            print("[INFO] Model does not support top token extraction.")
+                        batch_blank_infos.append({'attempt': attempts, 'raw_output': ans, 'resample_round': resample_round})
+                        continue
+                    batch_responses.append(clean)
+                    batch_log_liks.append(tls)
+                    batch_embeds.append(tbg_embedding)
+                # Accumulate all responses and blank infos
+                responses.extend(batch_responses)
+                log_liks.extend(batch_log_liks)
+                embeds.extend(batch_embeds)
+                blank_response_infos.extend(batch_blank_infos)
+                # Optionally, log blank response info to file
+                if batch_blank_infos:
+                    with open('/workspace/sep-probe-judge/generate_answers_output.txt', 'a', encoding='utf-8') as outf:
+                        for info in batch_blank_infos:
+                            try:
+                                outf.write(f"[BLANK RESPONSE] Attempt {info['attempt']} (Resample round {info['resample_round']}): Raw model output was blank or malformed.\n")
+                                outf.write(f"Raw output: {repr(info['raw_output'])}\n")
+                            except UnicodeEncodeError:
+                                # Skip writing this line if encoding fails
+                                continue
+                # Check if we need to resample
+                if len([r for r in batch_responses if r.strip() == ""]) > 1 and resample_round < max_resample_rounds:
+                    print(f"[RESAMPLE] More than one blank response in batch (round {resample_round}). Resampling...")
+                    resample_round += 1
+                else:
+                    break
             if len(responses) < 3:
                 continue
 
@@ -189,6 +231,19 @@ def main(args):
                         print(f"  - {r}")
                 print(f"Cluster IDs: {sem_ids}")
                 entropy = cluster_assignment_entropy(sem_ids)
+                # Save outputs with 0 entropy in a separate file
+                if entropy == 0:
+                    with open('/workspace/sep-probe-judge/zero_entropy_outputs.txt', 'a') as zf:
+                        zf.write(f"Split: {split_name}\n")
+                        zf.write(f"Example ID: {ex['id']}\n")
+                        zf.write("---------------- PROMPT ----------------\n")
+                        zf.write(lp + "\n")
+                        zf.write("------------ MODEL ANSWERS -------------\n")
+                        for i, r in enumerate(responses, 1):
+                            zf.write(f"{i}. {r}\n")
+                        zf.write(f"Entropy: {entropy:.4f}\n")
+                        zf.write(f"Reference Response: {resp}\n")
+                        zf.write("----------------------------------------\n\n")
             except Exception:
                 continue
 
@@ -236,7 +291,7 @@ def main(args):
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     parser = utils.get_parser()
-    parser.add_argument("--num_few_shot", type=int, default=3,
+    parser.add_argument("--num_few_shot", type=int, default=2,
                         help="number of few-shot examples in the prompt")
     args = parser.parse_args()
     print(f"Starting run with args: {args}")
