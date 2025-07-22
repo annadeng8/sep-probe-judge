@@ -7,8 +7,8 @@ Revision notes
 • keep the entire two-line evaluation in `responses`
 • print the prompt and *every* sampled answer to stdout
 • **strict `clean_evaluation()`** – only accept answers that
-    ▸ have “Rating:” 1-5
-    ▸ have a non-empty “Rationale: …”
+    ▸ have "Rating:" 1-5
+    ▸ have a non-empty "Rationale: …"
 • malformed answers are silently skipped
 • **prints entropy** for every kept batch
 • **NEW**: shuffle train/validation example order so the same question
@@ -17,6 +17,7 @@ Revision notes
 ***Current hot-fix***
   – format filtering turned **off** (no answers discarded for bad format)
   – now prints progress `example/total` after every kept batch
+  – FIXED: blank response issues by updating model generation parameters
 """
 import sys
 import re
@@ -132,12 +133,18 @@ def main(args):
             # ----- Greedy ----------------------------------------------------
             try:
                 g_ans, _, (g_last, g_sec, g_pre) = model.batch_predict(
-                    [lp], temperature=0.1, return_latent=True
+                    [lp], 
+                    temperature=0.1, 
+                    return_latent=True,
+                    stop_sequences=["END"],  # Only stop on END, not special tokens
+                    min_tokens=20  # Force minimum generation
                 )[0]
                 greedy = clean_evaluation(g_ans)
                 if greedy is None:
+                    print(f"[GREEDY FAILED] Raw greedy output: {repr(g_ans)}")
                     continue
-            except Exception:
+            except Exception as e:
+                print(f"[GREEDY ERROR] Exception: {e}")
                 continue
 
             # ----- Sampling --------------------------------------------------
@@ -151,9 +158,18 @@ def main(args):
                 batch_blank_infos = []
                 while len(batch_responses) < 10 and attempts < 40:
                     attempts += 1
-                    ans, tls, (e_last, slt_embedding, tbg_embedding) = model.batch_predict(
-                        [lp], temperature=args.temperature, return_latent=True
-                    )[0]
+                    try:
+                        ans, tls, (e_last, slt_embedding, tbg_embedding) = model.batch_predict(
+                            [lp], 
+                            temperature=args.temperature, 
+                            return_latent=True,
+                            stop_sequences=["END"],  # Only stop on END
+                            min_tokens=20  # Force minimum generation
+                        )[0]
+                    except Exception as e:
+                        print(f"[SAMPLING ERROR] Attempt {attempts}: {e}")
+                        continue
+                        
                     clean = clean_evaluation(ans)
                     if clean is None or clean.strip() == "":
                         # Output info for blank model responses
@@ -161,8 +177,11 @@ def main(args):
                         print(f"Raw output: {repr(ans)}")
                         # Investigate top tokens if possible
                         if hasattr(model, 'get_top_tokens'):
-                            top_tokens = model.get_top_tokens([lp])
-                            print(f"Top tokens for blank response: {top_tokens}")
+                            try:
+                                top_tokens = model.get_top_tokens([lp])
+                                print(f"Top tokens for blank response: {top_tokens}")
+                            except:
+                                print("[INFO] Could not extract top tokens.")
                         else:
                             print("[INFO] Model does not support top token extraction.")
                         batch_blank_infos.append({'attempt': attempts, 'raw_output': ans, 'resample_round': resample_round})
@@ -192,6 +211,7 @@ def main(args):
                 else:
                     break
             if len(responses) < 3:
+                print(f"[INSUFFICIENT RESPONSES] Only got {len(responses)} responses, need at least 3")
                 continue
 
             # ----- Entropy ---------------------------------------------------
@@ -219,9 +239,10 @@ def main(args):
                         for i, r in enumerate(responses, 1):
                             zf.write(f"{i}. {r}\n")
                         zf.write(f"Entropy: {entropy:.4f}\n")
-                        zf.write(f"Reference Response: {resp}\n")
+                        zf.write(f"Reference Response: {responses[0] if responses else 'N/A'}\n")
                         zf.write("----------------------------------------\n\n")
-            except Exception:
+            except Exception as e:
+                print(f"[ENTROPY ERROR] Exception: {e}")
                 continue
 
             # ----- Print to terminal ----------------------------------------
@@ -250,7 +271,7 @@ def main(args):
             collected += 1
 
             # --- progress ----------------------------------------------------
-            print(f"Progress: {collected}/{args.num_samples} examples processed")  # <-- NEW
+            print(f"Progress: {collected}/{args.num_samples} examples processed")
 
         utils.save(
             generations, f"{split_name}_generations.pkl",
