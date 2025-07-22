@@ -57,6 +57,8 @@ class HuggingfaceModel:
         *,
         return_latent: bool = False,
         batch_size: int = 10,
+        stop_sequences: list = None,
+        min_tokens: int = 20,
     ):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         results = []
@@ -72,33 +74,55 @@ class HuggingfaceModel:
                 return_tensors="pt",
             ).to(device)
 
-            criteria = StoppingCriteriaList(
-                [StopWordsCriteria(["Q:", "Context:", "END"], self.tokenizer, enc["input_ids"])]
-            )
+            # Create stopping criteria - only if stop_sequences is not empty
+            criteria_list = []
+            if stop_sequences:
+                criteria_list.append(
+                    StopWordsCriteria(stop_sequences, self.tokenizer, enc["input_ids"])
+                )
+            criteria = StoppingCriteriaList(criteria_list) if criteria_list else None
 
             with torch.no_grad():
-                gen = self.model.generate(
-                    input_ids=enc["input_ids"],
-                    attention_mask=enc["attention_mask"],
-                    max_new_tokens=self.max_new_tokens,
-                    stopping_criteria=criteria,
-                    return_dict_in_generate=True,
-                    output_scores=True,
-                    output_hidden_states=True,
-                    temperature=temperature,
-                    do_sample=True,
-                    top_p=0.9,
-                    top_k=50,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                )
+                gen_kwargs = {
+                    "input_ids": enc["input_ids"],
+                    "attention_mask": enc["attention_mask"],
+                    "max_new_tokens": max(self.max_new_tokens, min_tokens),
+                    "min_new_tokens": min_tokens,  # Force minimum generation
+                    "return_dict_in_generate": True,
+                    "output_scores": True,
+                    "output_hidden_states": True,
+                    "temperature": temperature,
+                    "do_sample": True,
+                    "top_p": 0.9,
+                    "top_k": 50,
+                    "pad_token_id": self.tokenizer.eos_token_id,
+                    # Suppress special tokens that cause early termination
+                    "suppress_tokens": [
+                        self.tokenizer.convert_tokens_to_ids(token)
+                        for token in ["<end_of_turn>", "<eos>"]
+                        if token in self.tokenizer.get_vocab()
+                    ],
+                }
+                
+                # Only add stopping criteria if we have any
+                if criteria:
+                    gen_kwargs["stopping_criteria"] = criteria
+                
+                gen = self.model.generate(**gen_kwargs)
 
             hid_steps = gen.hidden_states  # tuple(len = #generated tokens)
 
             for idx, prompt in enumerate(batch):
                 full = self.tokenizer.decode(gen.sequences[idx], skip_special_tokens=True)
                 tail = full[len(prompt):]
+                
+                # Check for END token or use the full generation
                 pos = tail.find("END")
                 slice_txt = tail[:pos].strip() if pos != -1 else tail.strip()
+                
+                # Additional safety: if still blank, take more of the generation
+                if not slice_txt and len(tail) > 0:
+                    slice_txt = tail.strip()
 
                 tok_ids = self.tokenizer(
                     full[: len(prompt) + len(slice_txt)], return_tensors="pt"
