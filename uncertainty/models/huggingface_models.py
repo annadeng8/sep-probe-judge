@@ -96,12 +96,6 @@ class HuggingfaceModel:
                     "top_p": 0.9,
                     "top_k": 50,
                     "pad_token_id": self.tokenizer.eos_token_id,
-                    # Suppress special tokens that cause early termination
-                    "suppress_tokens": [
-                        self.tokenizer.convert_tokens_to_ids(token)
-                        for token in ["<end_of_turn>", "<eos>"]
-                        if token in self.tokenizer.get_vocab()
-                    ],
                 }
                 
                 # Only add stopping criteria if we have any
