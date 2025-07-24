@@ -128,20 +128,27 @@ class HuggingfaceModel:
                 if n_gen > len(hid_steps):
                     n_gen = len(hid_steps)
 
-                last_emb = hid_steps[n_gen - 1][-1][idx, -1, :].detach().cpu()
-                sec_emb  = (
-                    hid_steps[n_gen - 2][-1][idx, -1, :].detach().cpu()
-                    if n_gen >= 2
-                    else None
-                )
-                pre_emb  = hid_steps[0][-1][idx, -1, :].detach().cpu()
+                # FIXED: Extract hidden states from the correct positions
+                # TBG (Token Before Generation) - last token of the prompt
+                tbg_embedding = hid_steps[0][-1][idx, -1, :].detach().cpu()
+                
+                # SLT (Second Last Token) - second-to-last generated token
+                if n_gen >= 2:
+                    slt_embedding = hid_steps[n_gen - 2][-1][idx, -1, :].detach().cpu()
+                else:
+                    # If only one token generated, use the first generated token
+                    slt_embedding = hid_steps[0][-1][idx, -1, :].detach().cpu()
+                
+                # Last generated token (for compatibility, though paper doesn't use this)
+                last_embedding = hid_steps[n_gen - 1][-1][idx, -1, :].detach().cpu()
 
                 trans = self.model.compute_transition_scores(
                     gen.sequences, gen.scores, normalize_logits=True
                 )
                 log_liks = [s.item() for s in trans[idx][:n_gen]]
 
-                lat = (last_emb, sec_emb, pre_emb) if return_latent else None
+                # Return in order: (last_embedding, slt_embedding, tbg_embedding)
+                lat = (last_embedding, slt_embedding, tbg_embedding) if return_latent else None
                 results.append((slice_txt, log_liks, lat))
 
         return results
