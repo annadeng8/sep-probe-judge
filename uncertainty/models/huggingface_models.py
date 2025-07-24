@@ -128,13 +128,13 @@ class HuggingfaceModel:
                 if n_gen > len(hid_steps):
                     n_gen = len(hid_steps)
 
-                last_emb = hid_steps[n_gen - 1][-1][idx, -1, :].cpu()
-                sec_emb = (
-                    torch.stack([l[idx, -1, :] for l in hid_steps[n_gen - 2]]).cpu()
+                last_emb = hid_steps[n_gen - 1][-1][idx, -1, :].detach().cpu()
+                sec_emb  = (
+                    hid_steps[n_gen - 2][-1][idx, -1, :].detach().cpu()
                     if n_gen >= 2
                     else None
                 )
-                pre_emb = torch.stack([l[idx, -1, :] for l in hid_steps[0]]).cpu()
+                pre_emb  = hid_steps[0][-1][idx, -1, :].detach().cpu()
 
                 trans = self.model.compute_transition_scores(
                     gen.sequences, gen.scores, normalize_logits=True
