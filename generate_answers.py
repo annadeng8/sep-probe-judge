@@ -255,15 +255,20 @@ def main(args):
             print("----------------------------------------\n")
 
             # ----- Store -----------------------------------------------------
+            # In the main loop, when storing the generations:
+            
+            # Use TBG embedding (Token Before Generation) - this is g_pre in your code
+            # OR use SLT embedding (Second Last Token) - this is g_sec in your code
+            
             generations[ex["id"]] = {
-                "context": conv, # Store the full conversation
+                "context": conv,
                 "question": "Evaluate the following model response: " + conv,
-                "responses": list(zip(responses, log_liks, embeds)),
+                "responses": list(zip(responses, log_liks, embeds)),  # embeds here should be TBG embeddings
                 "most_likely_answer": {
                     "response": greedy,
                     "last_embedding": g_last,
-                    "sec_last_embedding": g_sec,
-                    "prompt_last_embedding": g_pre,
+                    "sec_last_embedding": g_sec,  # This is SLT
+                    "prompt_last_embedding": g_pre,  # This is TBG
                 },
                 "entropy": entropy,
                 "reference": conv,
