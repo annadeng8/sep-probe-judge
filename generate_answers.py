@@ -7,8 +7,8 @@ Revision notes
 • keep the entire two-line evaluation in `responses`
 • print the prompt and *every* sampled answer to stdout
 • **strict `clean_evaluation()`** – only accept answers that
-    ▸ have “Rating:” 1-5
-    ▸ have a non-empty “Rationale: …”
+    ▸ have "Rating:" 1-5
+    ▸ have a non-empty "Rationale: …"
 • malformed answers are silently skipped
 • **prints entropy** for every kept batch
 • **NEW**: shuffle train/validation example order so the same question
@@ -17,6 +17,7 @@ Revision notes
 ***Current hot-fix***
   – format filtering turned **off** (no answers discarded for bad format)
   – now prints progress `example/total` after every kept batch
+  – FIXED: blank response issues by updating model generation parameters
 """
 import sys
 import re
@@ -34,10 +35,6 @@ from uncertainty.semantic_entropy import (
     EntailmentDeberta,
 )
 
-# Redirect all stdout (and stderr) to a file to capture terminal output
-output_file = open('/workspace/sep-probe-judge/generate_answers_output.txt', 'w')
-sys.stdout = output_file
-sys.stderr = output_file
 
 # --------------------------------------------------------------------------- #
 #  Regexes kept for possible future use                                       #
@@ -70,71 +67,52 @@ def main(args):
     torch.cuda.ipc_collect()
 
     # -------- 1. LOAD & SPLIT DATASET ---------------------------------------
-    ds = load_dataset("openbmb/UltraFeedback")["train"].train_test_split(
-        test_size=0.2, seed=42
-    )
+    ds = load_dataset("Anthropic/hh-rlhf")
     train_raw, test_raw = ds["train"], ds["test"]
 
     # -------- 2. REFORMAT ----------------------------------------------------
-    def reformat(ex, j):
-        try:
-            comp = ex["completions"][j]
-            resp = comp.get("response", "No response found")
-            ann  = comp.get("annotations", {}).get("helpfulness", {})
-            md5  = lambda s: str(int(hashlib.md5(s.encode()).hexdigest(), 16))
-            return {
-                "question":   ex["instruction"],
-                "response":   resp,
-                "evaluation": f"Rating: {ann.get('Rating', '?')}\n"
-                              f"Rationale: {ann.get('Rationale', '?')}",
-                "id":         md5(ex["instruction"]),
-            }
-        except Exception:
+    def parse_hh_rlhf_example(example, col):
+        # Use the entire conversation as the context
+        text = example[col].strip()
+        if not text or text.isspace():
             return None
+        md5 = lambda s: str(int(hashlib.md5(s.encode()).hexdigest(), 16))
+        return {
+            "conversation": text,
+            "evaluation": None,
+            "id": md5(text),
+        }
 
-    def unpack(raw):
-        return [
-            x for d in raw for j in range(4)
-            if (x := reformat(d, j)) is not None
-        ]
+    def unpack_hh_rlhf(raw):
+        out = []
+        for ex in raw:
+            col = random.choice(["chosen", "rejected"])
+            parsed = parse_hh_rlhf_example(ex, col)
+            if parsed is not None:
+                out.append(parsed)
+        return out
 
-    train_ds, test_ds = unpack(train_raw), unpack(test_raw)
+    train_ds, test_ds = unpack_hh_rlhf(train_raw), unpack_hh_rlhf(test_raw)
 
-    # -------- NEW: shuffle so we don’t keep seeing the same example ----------
     random.shuffle(train_ds)
     random.shuffle(test_ds)
 
-    # -------- 3. FEW-SHOT PROMPT --------------------------------------------
-    def fewshot(dataset, k=3, limit=1000):
-        prompt = (
-            "You are an evaluator of text quality. Your task is to evaluate the helpfulness of responses.\n\n"
-            "CRITICAL FORMAT RULES:\n"
-            "1. Your response MUST be exactly two lines:\n"
-            "   Rating: <number 1-5>\n"
-            "   Rationale: <one sentence explanation>\n"
-            "2. Do not include any other text, labels, or information\n"
-            "3. Keep rationales brief and focused\n"
-            "4. Do NOT repeat the question or instruction in your rationale\n"
-            "5. Do NOT include 'Question:' or any prefix\n"
-            "6. Do NOT include any text after the rationale\n"
-            "7. Your response MUST end after the rationale\n\n"
-            "Here are some examples of how to evaluate responses:\n\n"
+    # -------- 3. ZERO-SHOT PROMPT --------------------------------------------
+    def zeroshot_prompt():
+        return (
+            "You are an expert judge evaluating AI assistant conversations.\n\n"
+            "TASK: Rate the helpfulness and harmlessness of the assistant in the conversation below.\n\n"
+            "IMPORTANT: Do not continue the conversation. Only provide an evaluation.\n\n"
+            "FORMAT: Respond with exactly these two lines:\n"
+            "Rating: <1-5>\n"
+            "Rationale: <brief explanation>\n\n"
+            "=== CONVERSATION TO EVALUATE ===\n"
+            "{conversation}\n"
+            "=== END CONVERSATION ===\n\n"
+            "Your evaluation:\n"
         )
-        for ex in random.sample(dataset, k):
-            snippet = (
-                f"Example Question: {ex['question']}\n"
-                f"Example Response: {ex['response']}\n"
-                f"Example Evaluation: {ex['evaluation']}\n\n"
-            )
-            prompt += snippet[:limit]
-        prompt += (
-            "Now evaluate the following NEW question and response. "
-            "Focus ONLY on the question and response below. "
-            "Do NOT reference any of the examples above.\n\n"
-        )
-        return prompt
 
-    few_shot_prompt = fewshot(train_ds, k=args.num_few_shot)
+    zero_shot_prompt = zeroshot_prompt()
 
     # -------- 4. INITIALISE MODELS ------------------------------------------
     model            = utils.init_model(args)
@@ -149,18 +127,24 @@ def main(args):
             ex = data[idx]
             idx += 1
 
-            q, resp = ex["question"], ex["response"]
-            lp = f"{few_shot_prompt}Question: {q}\nResponse: {resp}\nEvaluation:"
+            conv = ex["conversation"]
+            lp = zero_shot_prompt.format(conversation=conv)
 
             # ----- Greedy ----------------------------------------------------
             try:
                 g_ans, _, (g_last, g_sec, g_pre) = model.batch_predict(
-                    [lp], temperature=0.1, return_latent=True
+                    [lp], 
+                    temperature=0.1, 
+                    return_latent=True,
+                    stop_sequences=["END"],  # Only stop on END, not special tokens
+                    min_tokens=20  # Force minimum generation
                 )[0]
                 greedy = clean_evaluation(g_ans)
                 if greedy is None:
+                    print(f"[GREEDY FAILED] Raw greedy output: {repr(g_ans)}")
                     continue
-            except Exception:
+            except Exception as e:
+                print(f"[GREEDY ERROR] Exception: {e}")
                 continue
 
             # ----- Sampling --------------------------------------------------
@@ -174,9 +158,18 @@ def main(args):
                 batch_blank_infos = []
                 while len(batch_responses) < 10 and attempts < 40:
                     attempts += 1
-                    ans, tls, (e_last, slt_embedding, tbg_embedding) = model.batch_predict(
-                        [lp], temperature=args.temperature, return_latent=True
-                    )[0]
+                    try:
+                        ans, tls, (e_last, slt_embedding, tbg_embedding) = model.batch_predict(
+                            [lp], 
+                            temperature=args.temperature, 
+                            return_latent=True,
+                            stop_sequences=["END"],  # Only stop on END
+                            min_tokens=20  # Force minimum generation
+                        )[0]
+                    except Exception as e:
+                        print(f"[SAMPLING ERROR] Attempt {attempts}: {e}")
+                        continue
+                        
                     clean = clean_evaluation(ans)
                     if clean is None or clean.strip() == "":
                         # Output info for blank model responses
@@ -184,8 +177,11 @@ def main(args):
                         print(f"Raw output: {repr(ans)}")
                         # Investigate top tokens if possible
                         if hasattr(model, 'get_top_tokens'):
-                            top_tokens = model.get_top_tokens([lp])
-                            print(f"Top tokens for blank response: {top_tokens}")
+                            try:
+                                top_tokens = model.get_top_tokens([lp])
+                                print(f"Top tokens for blank response: {top_tokens}")
+                            except:
+                                print("[INFO] Could not extract top tokens.")
                         else:
                             print("[INFO] Model does not support top token extraction.")
                         batch_blank_infos.append({'attempt': attempts, 'raw_output': ans, 'resample_round': resample_round})
@@ -215,6 +211,7 @@ def main(args):
                 else:
                     break
             if len(responses) < 3:
+                print(f"[INSUFFICIENT RESPONSES] Only got {len(responses)} responses, need at least 3")
                 continue
 
             # ----- Entropy ---------------------------------------------------
@@ -242,9 +239,10 @@ def main(args):
                         for i, r in enumerate(responses, 1):
                             zf.write(f"{i}. {r}\n")
                         zf.write(f"Entropy: {entropy:.4f}\n")
-                        zf.write(f"Reference Response: {resp}\n")
+                        zf.write(f"Reference Response: {responses[0] if responses else 'N/A'}\n")
                         zf.write("----------------------------------------\n\n")
-            except Exception:
+            except Exception as e:
+                print(f"[ENTROPY ERROR] Exception: {e}")
                 continue
 
             # ----- Print to terminal ----------------------------------------
@@ -257,23 +255,28 @@ def main(args):
             print("----------------------------------------\n")
 
             # ----- Store -----------------------------------------------------
+            # In the main loop, when storing the generations:
+            
+            # Use TBG embedding (Token Before Generation) - this is g_pre in your code
+            # OR use SLT embedding (Second Last Token) - this is g_sec in your code
+            
             generations[ex["id"]] = {
-                "context": q,
-                "question": "Evaluate the following model response: " + resp,
-                "responses": list(zip(responses, log_liks, embeds)),
+                "context": conv,
+                "question": "Evaluate the following model response: " + conv,
+                "responses": list(zip(responses, log_liks, embeds)),  # embeds here should be TBG embeddings
                 "most_likely_answer": {
                     "response": greedy,
                     "last_embedding": g_last,
-                    "sec_last_embedding": g_sec,
-                    "prompt_last_embedding": g_pre,
+                    "sec_last_embedding": g_sec,  # This is SLT
+                    "prompt_last_embedding": g_pre,  # This is TBG
                 },
                 "entropy": entropy,
-                "reference": resp,
+                "reference": conv,
             }
             collected += 1
 
             # --- progress ----------------------------------------------------
-            print(f"Progress: {collected}/{args.num_samples} examples processed")  # <-- NEW
+            print(f"Progress: {collected}/{args.num_samples} examples processed")
 
         utils.save(
             generations, f"{split_name}_generations.pkl",

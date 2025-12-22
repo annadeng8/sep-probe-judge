@@ -36,7 +36,7 @@ class HuggingfaceModel:
         self.model_name = model_name
         self.token_limit = 8192
 
-        model_id = "google/gemma-2-9b-it"  # hard-wired judge model
+        model_id = "google/gemma-2-9b-it" #judge model
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_id,
             device_map="auto",
@@ -57,6 +57,8 @@ class HuggingfaceModel:
         *,
         return_latent: bool = False,
         batch_size: int = 10,
+        stop_sequences: list = None,
+        min_tokens: int = 20,
     ):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         results = []
@@ -72,58 +74,97 @@ class HuggingfaceModel:
                 return_tensors="pt",
             ).to(device)
 
-            criteria = StoppingCriteriaList(
-                [StopWordsCriteria(["Q:", "Context:", "END"], self.tokenizer, enc["input_ids"])]
-            )
+            self.eos_token = self.tokenizer.eos_token
+
+            # Create stopping criteria - only if stop_sequences is not empty
+            criteria_list = []
+            if stop_sequences:
+                # include both your custom markers (e.g. "END") and the model’s eos_token
+                seqs = stop_sequences + [self.eos_token]
+                criteria_list.append(
+                    StopWordsCriteria(seqs, self.tokenizer, enc["input_ids"])
+                )
+            criteria = StoppingCriteriaList(criteria_list) if criteria_list else None
 
             with torch.no_grad():
-                gen = self.model.generate(
-                    input_ids=enc["input_ids"],
-                    attention_mask=enc["attention_mask"],
-                    max_new_tokens=self.max_new_tokens,
-                    stopping_criteria=criteria,
-                    return_dict_in_generate=True,
-                    output_scores=True,
-                    output_hidden_states=True,
-                    temperature=temperature,
-                    do_sample=True,
-                    top_p=0.9,
-                    top_k=50,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                )
+                gen_kwargs = {
+                    "input_ids": enc["input_ids"],
+                    "attention_mask": enc["attention_mask"],
+                    "max_new_tokens": max(self.max_new_tokens, min_tokens),
+                    "min_new_tokens": min_tokens,  # Force minimum generation
+                    "return_dict_in_generate": True,
+                    "output_scores": True,
+                    "output_hidden_states": True,
+                    "temperature": temperature,
+                    "do_sample": True,
+                    "top_p": 0.9,
+                    "top_k": 50,
+                    "pad_token_id": self.tokenizer.eos_token_id,
+                }
+                
+                # Only add stopping criteria if we have any
+                if criteria:
+                    gen_kwargs["stopping_criteria"] = criteria
+                
+                gen = self.model.generate(**gen_kwargs)
 
             hid_steps = gen.hidden_states  # tuple(len = #generated tokens)
 
             for idx, prompt in enumerate(batch):
                 full = self.tokenizer.decode(gen.sequences[idx], skip_special_tokens=True)
                 tail = full[len(prompt):]
+                
+                # Check for END token or use the full generation
                 pos = tail.find("END")
                 slice_txt = tail[:pos].strip() if pos != -1 else tail.strip()
+                
+                # Additional safety: if still blank, take more of the generation
+                if not slice_txt and len(tail) > 0:
+                    slice_txt = tail.strip()
 
                 tok_ids = self.tokenizer(
                     full[: len(prompt) + len(slice_txt)], return_tensors="pt"
                 )["input_ids"]
                 tok_stop = tok_ids.shape[1]
                 n_prompt = (enc["input_ids"][idx] != self.tokenizer.pad_token_id).sum().item()
-                n_gen = max(tok_stop - n_prompt, 1)
-                # clip without logging
+                n_gen = tok_stop - n_prompt
+                if n_gen <= 0:
+                    n_gen = 1
+                # then clamp to what hidden actually contains
                 if n_gen > len(hid_steps):
                     n_gen = len(hid_steps)
 
-                last_emb = hid_steps[n_gen - 1][-1][idx, -1, :].cpu()
-                sec_emb = (
-                    torch.stack([l[idx, -1, :] for l in hid_steps[n_gen - 2]]).cpu()
-                    if n_gen >= 2
-                    else None
-                )
-                pre_emb = torch.stack([l[idx, -1, :] for l in hid_steps[0]]).cpu()
+                # FIXED: Extract hidden states from the correct positions
+                # TBG (Token Before Generation) - last token of the prompt
+                tbg_embedding = hid_steps[0][-1][idx, -1, :].detach().cpu()
+                
+                # SLT (Second Last Token) - second-to-last generated token
+                if n_gen >= 2 and (n_gen - 2) < len(hid_steps):
+                    sec_last_snapshot = hid_steps[n_gen - 2]
+                elif len(hid_steps) > 1:
+                    sec_last_snapshot = hid_steps[-2]
+                else:
+                    sec_last_snapshot = hid_steps[0]
+
+                slt_embedding = sec_last_snapshot[-1][idx, -1, :].cpu()
+                
+                # Last generated token (for compatibility, though paper doesn't use this)
+                if len(hid_steps) == 1:
+                    last_input = hid_steps[0]
+                elif (n_gen - 1) >= len(hid_steps):
+                    last_input = hid_steps[-1]
+                else:
+                    last_input = hid_steps[n_gen - 1]
+                last_layer = last_input[-1]          # shape (batch, seq_len, hidden_dim)
+                last_token_embedding = last_layer[idx, -1, :].cpu()
 
                 trans = self.model.compute_transition_scores(
                     gen.sequences, gen.scores, normalize_logits=True
                 )
                 log_liks = [s.item() for s in trans[idx][:n_gen]]
 
-                lat = (last_emb, sec_emb, pre_emb) if return_latent else None
+                # Return in order: (last_embedding, slt_embedding, tbg_embedding)
+                lat = (last_token_embedding, slt_embedding, tbg_embedding) if return_latent else None
                 results.append((slice_txt, log_liks, lat))
 
         return results
