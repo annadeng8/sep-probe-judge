@@ -36,7 +36,7 @@ class HuggingfaceModel:
         self.model_name = model_name
         self.token_limit = 8192
 
-        model_id = "google/gemma-2-9b-it"  # hard-wired judge model
+        model_id = "google/gemma-2-9b-it"
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_id,
             device_map="auto",
@@ -74,11 +74,15 @@ class HuggingfaceModel:
                 return_tensors="pt",
             ).to(device)
 
+            self.eos_token = self.tokenizer.eos_token
+
             # Create stopping criteria - only if stop_sequences is not empty
             criteria_list = []
             if stop_sequences:
+                # include both your custom markers (e.g. "END") and the model’s eos_token
+                seqs = stop_sequences + [self.eos_token]
                 criteria_list.append(
-                    StopWordsCriteria(stop_sequences, self.tokenizer, enc["input_ids"])
+                    StopWordsCriteria(seqs, self.tokenizer, enc["input_ids"])
                 )
             criteria = StoppingCriteriaList(criteria_list) if criteria_list else None
 
@@ -123,8 +127,10 @@ class HuggingfaceModel:
                 )["input_ids"]
                 tok_stop = tok_ids.shape[1]
                 n_prompt = (enc["input_ids"][idx] != self.tokenizer.pad_token_id).sum().item()
-                n_gen = max(tok_stop - n_prompt, 1)
-                # clip without logging
+                n_gen = tok_stop - n_prompt
+                if n_gen <= 0:
+                    n_gen = 1
+                # then clamp to what hidden actually contains
                 if n_gen > len(hid_steps):
                     n_gen = len(hid_steps)
 
@@ -133,14 +139,24 @@ class HuggingfaceModel:
                 tbg_embedding = hid_steps[0][-1][idx, -1, :].detach().cpu()
                 
                 # SLT (Second Last Token) - second-to-last generated token
-                if n_gen >= 2:
-                    slt_embedding = hid_steps[n_gen - 2][-1][idx, -1, :].detach().cpu()
+                if n_gen >= 2 and (n_gen - 2) < len(hid_steps):
+                    sec_last_snapshot = hid_steps[n_gen - 2]
+                elif len(hid_steps) > 1:
+                    sec_last_snapshot = hid_steps[-2]
                 else:
-                    # If only one token generated, use the first generated token
-                    slt_embedding = hid_steps[0][-1][idx, -1, :].detach().cpu()
+                    sec_last_snapshot = hid_steps[0]
+
+                slt_embedding = sec_last_snapshot[-1][idx, -1, :].cpu()
                 
                 # Last generated token (for compatibility, though paper doesn't use this)
-                last_embedding = hid_steps[n_gen - 1][-1][idx, -1, :].detach().cpu()
+                if len(hid_steps) == 1:
+                    last_input = hid_steps[0]
+                elif (n_gen - 1) >= len(hid_steps):
+                    last_input = hid_steps[-1]
+                else:
+                    last_input = hid_steps[n_gen - 1]
+                last_layer = last_input[-1]          # shape (batch, seq_len, hidden_dim)
+                last_token_embedding = last_layer[idx, -1, :].cpu()
 
                 trans = self.model.compute_transition_scores(
                     gen.sequences, gen.scores, normalize_logits=True
@@ -148,7 +164,7 @@ class HuggingfaceModel:
                 log_liks = [s.item() for s in trans[idx][:n_gen]]
 
                 # Return in order: (last_embedding, slt_embedding, tbg_embedding)
-                lat = (last_embedding, slt_embedding, tbg_embedding) if return_latent else None
+                lat = (last_token_embedding, slt_embedding, tbg_embedding) if return_latent else None
                 results.append((slice_txt, log_liks, lat))
 
         return results
